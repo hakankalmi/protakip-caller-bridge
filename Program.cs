@@ -1,3 +1,4 @@
+using System.Runtime.InteropServices;
 using Microsoft.Win32;
 
 namespace ProTakipCallerBridge;
@@ -32,6 +33,16 @@ internal static class Program
     /// </summary>
     private static NetgsmTcpClient? _netgsm;
     private static string? _netgsmVersion;
+    private static string? _netgsmUsername;
+    private static DateTime? _netgsmLastEventAt;
+
+    /// <summary>
+    /// Premium status window — opens on tray double-click and stays hidden
+    /// otherwise. Created once so we can keep the live call feed across
+    /// closes without losing history.
+    /// </summary>
+    private static StatusForm? _statusForm;
+    private static bool _backendReachable = true;
 
     private static readonly string LogDir = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
@@ -91,16 +102,15 @@ internal static class Program
 
             _tray = new NotifyIcon
             {
-                // SystemIcons.Application is a tiny generic icon — use the
-                // blue "information" one so the user can actually spot it in
-                // the hidden-icons flyout. Text appears as the hover tooltip.
-                Icon = SystemIcons.Information,
+                // Starts pending (amber) — flips to green when paired +
+                // heartbeat succeeds, flips to red on persistent failure.
+                Icon = BuildTrayIcon(TrayState.Pending),
                 Text = "ProTakip Caller Id",
                 Visible = true,
                 ContextMenuStrip = BuildTrayMenu(),
             };
             UpdateTrayState();
-            _tray.DoubleClick += (_, __) => ShowStatusBalloon();
+            _tray.DoubleClick += (_, __) => ShowStatusWindow();
             Log("Tray icon created");
 
             // Windows 11 hides tray icons by default. Pop a balloon tip on
@@ -110,8 +120,19 @@ internal static class Program
             _tray.ShowBalloonTip(
                 6000,
                 "ProTakip Caller Id çalışıyor",
-                "Görev çubuğu sağ alttaki ^ okuna tıklayın ve bu simgeyi sabitleyin. Gelen aramalar buradan iletilecek.",
+                "Durum penceresi için simgeye çift tıklayın. Görev çubuğundaki ^ okuna tıklayıp sabitlemeniz önerilir.",
                 ToolTipIcon.Info);
+
+            // Lazily build the status window — constructed once so the
+            // call-feed + timestamps survive hide/show cycles. Not Shown()
+            // here; user pops it via double-click.
+            _statusForm = new StatusForm(_cfg);
+            _statusForm.TestCallRequested += async (_, _) => await SendTestCallAsync();
+            _statusForm.RepairRequested   += (_, _) => Repair();
+            _statusForm.OpenLogRequested  += (_, _) => OpenLog();
+            _statusForm.UpdateCompany(_cfg.CompanyName);
+            _statusForm.UpdateUsb(connected: false, deviceSerial: null, lastSignalAt: null);
+            _statusForm.UpdateNetgsm(NetgsmState.Disabled);
 
             // If we aren't paired yet, block on the pair dialog before hooking
             // the DLL — no point listening for calls we can't forward.
@@ -148,12 +169,23 @@ internal static class Program
             _heartbeatTimer = new System.Threading.Timer(async _ =>
             {
                 if (!_cfg.IsPaired) return;
+                bool pingOk = false;
                 try
                 {
-                    var ok = await _api.PingAsync();
-                    if (!ok) Log("Ping returned non-success");
+                    pingOk = await _api.PingAsync();
+                    if (!pingOk) Log("Ping returned non-success");
                 }
                 catch (Exception ex) { Log("Ping threw: " + ex.Message); }
+
+                // Tray icon reflects backend reachability — amber while
+                // eşleşme bekleniyor, green on success, red if pings keep
+                // failing. Debounced via `_backendReachable` so a single
+                // blip doesn't flash the icon red.
+                if (_backendReachable != pingOk)
+                {
+                    _backendReachable = pingOk;
+                    _ui?.Post(_ => UpdateTrayState(), null);
+                }
 
                 // Best-effort PBX reconcile — any error just keeps the
                 // previous state alive.
@@ -166,6 +198,7 @@ internal static class Program
             Application.Run();
             _heartbeatTimer.Dispose();
             _netgsm?.Dispose();
+            _statusForm?.Dispose();
             Log("=== Bridge exited normally ===");
         }
         catch (Exception ex)
@@ -183,8 +216,12 @@ internal static class Program
 
     private static ContextMenuStrip BuildTrayMenu()
     {
-        var menu = new ContextMenuStrip();
-        menu.Items.Add("Durumu göster", null, (_, __) => ShowStatusBalloon());
+        var menu = new ContextMenuStrip
+        {
+            Font = new Font("Segoe UI", 9.5f),
+            ShowImageMargin = false,
+        };
+        menu.Items.Add("Durum penceresini aç", null, (_, __) => ShowStatusWindow());
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("Web paneli aç", null, (_, __) => OpenWeb());
         menu.Items.Add("Test çağrısı gönder", null, async (_, __) => await SendTestCallAsync());
@@ -197,41 +234,97 @@ internal static class Program
 
     private static void UpdateTrayState()
     {
-        if (_cfg.IsPaired)
-        {
-            _tray.Text = "ProTakip Caller Id — " + (_cfg.CompanyName ?? "Bağlı");
-        }
-        else
-        {
-            _tray.Text = "ProTakip Caller Id — Eşleşme bekleniyor";
-        }
-    }
-
-    private static void ShowStatusBalloon()
-    {
-        string title, msg;
-        ToolTipIcon icon;
+        string titleSuffix;
+        TrayState state;
 
         if (!_cfg.IsPaired)
         {
-            title = "Eşleşme bekleniyor";
-            msg = "app.protakip.com'daki Caller ID popup'ından 6 haneli kodu alın. Sağ tıklayıp 'Yeniden eşleştir'.";
-            icon = ToolTipIcon.Warning;
+            titleSuffix = "Eşleşme bekleniyor";
+            state = TrayState.Pending;
+        }
+        else if (!_backendReachable)
+        {
+            titleSuffix = "Sunucuya ulaşılamıyor";
+            state = TrayState.Error;
         }
         else
         {
-            title = _cfg.CompanyName ?? "Bağlı";
-            var deviceMsg = _lastDeviceSerial != null
-                ? $"Cihaz: {_lastDeviceSerial}"
-                : "Cihaz bağlantısı bekleniyor";
-            var signalMsg = _lastSignalAt > DateTime.MinValue
-                ? $"Son sinyal: {(DateTime.UtcNow - _lastSignalAt).TotalSeconds:0}s önce"
-                : "Henüz sinyal yok";
-            msg = $"{deviceMsg}\n{signalMsg}";
-            icon = ToolTipIcon.Info;
+            titleSuffix = _cfg.CompanyName ?? "Bağlı";
+            state = TrayState.Ok;
         }
 
-        _tray.ShowBalloonTip(4000, title, msg, icon);
+        _tray.Text = $"ProTakip Caller Id — {titleSuffix}";
+        _tray.Icon?.Dispose();
+        _tray.Icon = BuildTrayIcon(state);
+    }
+
+    /// <summary>
+    /// Tray icon states. Windows tray is 16x16 @ 100% DPI, scales to 20/24
+    /// at higher DPIs. We draw a filled circle on a translucent square so
+    /// the color is legible at any size.
+    /// </summary>
+    private enum TrayState { Ok, Pending, Error }
+
+    private static Icon BuildTrayIcon(TrayState state)
+    {
+        var color = state switch
+        {
+            TrayState.Ok      => Color.FromArgb(22, 163, 74),   // green-600
+            TrayState.Pending => Color.FromArgb(217, 119, 6),   // amber-600
+            TrayState.Error   => Color.FromArgb(220, 38, 38),   // red-600
+            _ => Color.Gray,
+        };
+
+        // 32x32 source — Windows downscales cleanly. Phone glyph inside a
+        // solid circle so the icon reads at 16px.
+        using var bmp = new Bitmap(32, 32);
+        using (var g = Graphics.FromImage(bmp))
+        {
+            g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+            g.Clear(Color.Transparent);
+            using var brush = new SolidBrush(color);
+            g.FillEllipse(brush, 2, 2, 28, 28);
+
+            // Simple phone glyph — offset handset shape on circle center.
+            using var pen = new Pen(Color.White, 2.4f)
+            {
+                StartCap = System.Drawing.Drawing2D.LineCap.Round,
+                EndCap = System.Drawing.Drawing2D.LineCap.Round,
+            };
+            // Earpiece + mouthpiece with a curve between — stylized ☏.
+            g.DrawArc(pen, 9, 9, 14, 14, 135, 270);
+        }
+        IntPtr hIcon = bmp.GetHicon();
+        try
+        {
+            return (Icon)Icon.FromHandle(hIcon).Clone();
+        }
+        finally
+        {
+            DestroyIcon(hIcon);
+        }
+    }
+
+    [DllImport("user32.dll", CharSet = CharSet.Auto, ExactSpelling = true)]
+    private static extern bool DestroyIcon(IntPtr handle);
+
+    private static void ShowStatusWindow()
+    {
+        if (_statusForm == null) return;
+        try
+        {
+            if (!_statusForm.Visible) _statusForm.Show();
+            if (_statusForm.WindowState == FormWindowState.Minimized)
+                _statusForm.WindowState = FormWindowState.Normal;
+            _statusForm.Activate();
+            _statusForm.BringToFront();
+            _statusForm.TopMost = true;
+            _statusForm.TopMost = false;
+        }
+        catch (Exception ex)
+        {
+            Log("ShowStatusWindow failed: " + ex.Message);
+        }
     }
 
     private static void OpenWeb()
@@ -319,6 +412,7 @@ internal static class Program
 
             if (!_cfg.IsPaired)
             {
+                _statusForm?.AddRecentCall(phoneNumber, "usb", success: false);
                 _tray.ShowBalloonTip(3000, "Eşleşme yok",
                     $"Gelen arama: {phoneNumber} (eşleşmemiş — backend'e iletilmedi)",
                     ToolTipIcon.Warning);
@@ -327,15 +421,14 @@ internal static class Program
 
             try
             {
-                var ok = await _api.IngestAsync(phoneNumber, line, deviceSerial, dateTime, other);
-                if (ok)
+                var ok = await _api.IngestAsync(phoneNumber, line, deviceSerial, dateTime, other, source: "usb");
+                _statusForm?.AddRecentCall(phoneNumber, "usb", ok);
+                if (!ok)
                 {
-                    _tray.ShowBalloonTip(2500, "Gelen arama",
-                        $"{phoneNumber}  (hat {line})", ToolTipIcon.Info);
-                }
-                else
-                {
-                    _tray.ShowBalloonTip(3500, "Iletilemedi",
+                    // Sadece başarısızlıkta balon patlat — başarılı çağrıda
+                    // tarayıcıda zaten dock açılıyor, iki yerde bildirim
+                    // sekreterin ekranını karıştırmasın.
+                    _tray.ShowBalloonTip(3500, "İletilemedi",
                         "Backend 401 döndü — 'Yeniden eşleştir' gerekebilir.",
                         ToolTipIcon.Warning);
                 }
@@ -343,6 +436,7 @@ internal static class Program
             catch (Exception ex)
             {
                 Log("IngestAsync failed: " + ex.Message);
+                _statusForm?.AddRecentCall(phoneNumber, "usb", success: false);
                 _tray.ShowBalloonTip(3500, "Ağ hatası", ex.Message, ToolTipIcon.Error);
             }
         }, null);
@@ -354,6 +448,16 @@ internal static class Program
         _lastSignalAt = DateTime.UtcNow;
         if (!string.IsNullOrWhiteSpace(deviceSerial))
             _lastDeviceSerial = deviceSerial;
+
+        // USB sinyali geldiğinde status penceresine yansıt. Sinyal her 5-10
+        // saniyede bir geliyor — UI'ı yormasın diye sadece değişiklikte
+        // güncelleme mantığı StatusForm içinde (label compare).
+        _ui?.Post(_ =>
+        {
+            _statusForm?.UpdateUsb(connected: true,
+                deviceSerial: _lastDeviceSerial,
+                lastSignalAt: _lastSignalAt);
+        }, null);
     }
 
     // ── NetGSM Bulut Santral (parallel to USB) ──────────────────────────
@@ -385,7 +489,10 @@ internal static class Program
                 _netgsm.Dispose();
                 _netgsm = null;
                 _netgsmVersion = null;
+                _netgsmUsername = null;
+                _netgsmLastEventAt = null;
             }
+            _ui?.Post(_ => _statusForm?.UpdateNetgsm(NetgsmState.Disabled), null);
             return;
         }
 
@@ -406,7 +513,13 @@ internal static class Program
             log: Log);
         _netgsm.Start();
         _netgsmVersion = cfg.Version;
+        _netgsmUsername = cfg.Username;
+        _netgsmLastEventAt = null;
         Log($"Netgsm subscriber started — version={cfg.Version}");
+        _ui?.Post(_ =>
+        {
+            _statusForm?.UpdateNetgsm(NetgsmState.Connected, cfg.Username, _netgsmLastEventAt);
+        }, null);
     }
 
     /// <summary>
@@ -429,24 +542,19 @@ internal static class Program
                 other: "netgsm-tcp",
                 source: "netgsm");
 
-            if (ok)
+            _netgsmLastEventAt = DateTime.UtcNow;
+            _ui?.Post(_ =>
             {
-                // Best-effort UI ping — tray stays informative but we don't
-                // want to nag the user when the dock already popped in-app.
-                _ui?.Post(_ =>
-                {
-                    _tray?.ShowBalloonTip(2000, "Gelen arama (NetGSM)",
-                        phoneNumber, ToolTipIcon.Info);
-                }, null);
-            }
-            else
-            {
-                Log("Netgsm ingest returned non-success");
-            }
+                _statusForm?.AddRecentCall(phoneNumber, "netgsm", ok);
+                _statusForm?.UpdateNetgsm(NetgsmState.Connected, _netgsmUsername, _netgsmLastEventAt);
+            }, null);
+
+            if (!ok) Log("Netgsm ingest returned non-success");
         }
         catch (Exception ex)
         {
             Log("Netgsm ingest threw: " + ex.Message);
+            _ui?.Post(_ => _statusForm?.AddRecentCall(phoneNumber, "netgsm", success: false), null);
         }
     }
 
