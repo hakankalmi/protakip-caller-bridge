@@ -59,7 +59,14 @@ public class ApiClient
         }
     }
 
-    public async Task<bool> IngestAsync(string phoneNumber, string? line, string? deviceSerial, string? callAt, string? other, CancellationToken ct = default)
+    public async Task<bool> IngestAsync(
+        string phoneNumber,
+        string? line,
+        string? deviceSerial,
+        string? callAt,
+        string? other,
+        string? source = null,
+        CancellationToken ct = default)
     {
         if (string.IsNullOrEmpty(_cfg.DeviceToken)) return false;
 
@@ -72,12 +79,38 @@ public class ApiClient
                 deviceSerial,
                 callAt,
                 other,
+                source,
             }),
         };
         req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _cfg.DeviceToken);
 
         using var resp = await _http.SendAsync(req, ct);
         return resp.IsSuccessStatusCode;
+    }
+
+    /// <summary>
+    /// Pulls NetGSM credentials for the paired company. Bridge uses the
+    /// returned <c>version</c> string to decide whether to tear down and
+    /// re-open its TCP socket — any change on the server side (enabled flag
+    /// flipped, credentials updated, provider swapped) bumps the version.
+    /// Returns null on auth/network failure; the bridge keeps its last known
+    /// config in that case instead of killing an otherwise healthy socket.
+    /// </summary>
+    public async Task<PbxConfigResponse?> GetPbxConfigAsync(CancellationToken ct = default)
+    {
+        if (string.IsNullOrEmpty(_cfg.DeviceToken)) return null;
+        var req = new HttpRequestMessage(HttpMethod.Get, "caller-id/pbx-config");
+        req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _cfg.DeviceToken);
+        try
+        {
+            using var resp = await _http.SendAsync(req, ct);
+            if (!resp.IsSuccessStatusCode) return null;
+            return await resp.Content.ReadFromJsonAsync<PbxConfigResponse>(cancellationToken: ct);
+        }
+        catch
+        {
+            return null;
+        }
     }
 }
 
@@ -87,4 +120,15 @@ public class ClaimResponse
     public string DeviceToken { get; set; } = string.Empty;
     public string CompanyName { get; set; } = string.Empty;
     public Guid CompanyId { get; set; }
+}
+
+public class PbxConfigResponse
+{
+    public bool Enabled { get; set; }
+    public string? Provider { get; set; }
+    public string? Host { get; set; }
+    public int Port { get; set; }
+    public string? Username { get; set; }
+    public string? Password { get; set; }
+    public string? Version { get; set; }
 }

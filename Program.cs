@@ -24,6 +24,15 @@ internal static class Program
     private static DateTime _lastSignalAt = DateTime.MinValue;
     private static System.Threading.Timer? _heartbeatTimer;
 
+    /// <summary>
+    /// Active NetGSM TCP client when the paired company has Bulut Santral
+    /// enabled. Null when the company is USB-only or not configured yet.
+    /// Heartbeat re-polls <c>/caller-id/pbx-config</c>; if version changes
+    /// or enabled flag flips we stop the old client and start a new one.
+    /// </summary>
+    private static NetgsmTcpClient? _netgsm;
+    private static string? _netgsmVersion;
+
     private static readonly string LogDir = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
         "ProTakipCallerBridge");
@@ -132,8 +141,10 @@ internal static class Program
 
             // Heartbeat — every 60s push /caller-id/ping so the web header
             // indicator stays green during idle periods (no calls for hours).
-            // First tick after 5s so a freshly-paired bridge is immediately
-            // visible as "Bağlı" to the secretary watching the indicator.
+            // Also reconciles the NetGSM Bulut Santral TCP subscription: if
+            // the company enabled PBX since the last tick (or changed creds)
+            // we start / restart the socket here. First tick after 5s so a
+            // freshly-paired bridge comes online quickly.
             _heartbeatTimer = new System.Threading.Timer(async _ =>
             {
                 if (!_cfg.IsPaired) return;
@@ -143,12 +154,18 @@ internal static class Program
                     if (!ok) Log("Ping returned non-success");
                 }
                 catch (Exception ex) { Log("Ping threw: " + ex.Message); }
+
+                // Best-effort PBX reconcile — any error just keeps the
+                // previous state alive.
+                try { await ReconcileNetgsmAsync(); }
+                catch (Exception ex) { Log("Netgsm reconcile threw: " + ex.Message); }
             }, null, TimeSpan.FromSeconds(5), TimeSpan.FromSeconds(60));
             Log("Heartbeat timer armed (5s initial, 60s interval)");
 
             Log("Entering message loop");
             Application.Run();
             _heartbeatTimer.Dispose();
+            _netgsm?.Dispose();
             Log("=== Bridge exited normally ===");
         }
         catch (Exception ex)
@@ -337,6 +354,100 @@ internal static class Program
         _lastSignalAt = DateTime.UtcNow;
         if (!string.IsNullOrWhiteSpace(deviceSerial))
             _lastDeviceSerial = deviceSerial;
+    }
+
+    // ── NetGSM Bulut Santral (parallel to USB) ──────────────────────────
+
+    /// <summary>
+    /// Pull current PBX config from the backend, then start/stop/restart the
+    /// local NetGSM TCP subscriber as needed. USB and NetGSM run side-by-side
+    /// — both source paths land at the same /caller-id/ingest endpoint, just
+    /// with different <c>source</c> tags.
+    /// </summary>
+    private static async Task ReconcileNetgsmAsync()
+    {
+        var cfg = await _api.GetPbxConfigAsync();
+
+        // Network/auth glitch — keep whatever we have running rather than
+        // tearing down a healthy socket over a transient error.
+        if (cfg == null) return;
+
+        // Company turned PBX off (or it was never on) — stop any running
+        // subscription and clear state.
+        if (!cfg.Enabled ||
+            string.IsNullOrWhiteSpace(cfg.Username) ||
+            string.IsNullOrWhiteSpace(cfg.Password) ||
+            string.IsNullOrWhiteSpace(cfg.Host))
+        {
+            if (_netgsm != null)
+            {
+                Log("Netgsm disabled on server — stopping subscriber");
+                _netgsm.Dispose();
+                _netgsm = null;
+                _netgsmVersion = null;
+            }
+            return;
+        }
+
+        // Already running with the same credentials — nothing to do.
+        if (_netgsm != null && _netgsmVersion == cfg.Version) return;
+
+        // Credentials changed (or first start) — tear down + restart with
+        // the new ones. NetGSM can take a second or two to accept a new
+        // login, but we don't block the UI thread on this.
+        _netgsm?.Dispose();
+        _netgsm = new NetgsmTcpClient(
+            host: cfg.Host!,
+            port: cfg.Port > 0 ? cfg.Port : 9110,
+            username: cfg.Username!,
+            password: cfg.Password!,
+            version: cfg.Version ?? string.Empty,
+            onIncomingNumber: OnNetgsmIncomingAsync,
+            log: Log);
+        _netgsm.Start();
+        _netgsmVersion = cfg.Version;
+        Log($"Netgsm subscriber started — version={cfg.Version}");
+    }
+
+    /// <summary>
+    /// Callback from <see cref="NetgsmTcpClient"/> on every inbound ring.
+    /// Posts to the same /caller-id/ingest endpoint USB uses, tagged with
+    /// <c>source="netgsm"</c> so the backend / browser dock can tell where
+    /// the event came from.
+    /// </summary>
+    private static async Task OnNetgsmIncomingAsync(string phoneNumber)
+    {
+        if (!_cfg.IsPaired) return;
+
+        try
+        {
+            var ok = await _api.IngestAsync(
+                phoneNumber: phoneNumber,
+                line: null,
+                deviceSerial: null,
+                callAt: DateTime.UtcNow.ToString("O"),
+                other: "netgsm-tcp",
+                source: "netgsm");
+
+            if (ok)
+            {
+                // Best-effort UI ping — tray stays informative but we don't
+                // want to nag the user when the dock already popped in-app.
+                _ui?.Post(_ =>
+                {
+                    _tray?.ShowBalloonTip(2000, "Gelen arama (NetGSM)",
+                        phoneNumber, ToolTipIcon.Info);
+                }, null);
+            }
+            else
+            {
+                Log("Netgsm ingest returned non-success");
+            }
+        }
+        catch (Exception ex)
+        {
+            Log("Netgsm ingest threw: " + ex.Message);
+        }
     }
 
     // ── Manual test ─────────────────────────────────────────────────────
