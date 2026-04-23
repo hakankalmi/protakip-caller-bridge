@@ -1,3 +1,4 @@
+using System.Reflection;
 using System.Runtime.InteropServices;
 
 namespace ProTakipCallerBridge;
@@ -10,9 +11,35 @@ namespace ProTakipCallerBridge;
 /// <c>IntPtr.Size</c>. Callback delegates must stay rooted for the process
 /// lifetime (<see cref="_callerIdKeepAlive"/>/<see cref="_signalKeepAlive"/>)
 /// — the DLL keeps native references and a GC'd delegate becomes a crash.
+///
+/// We ship as a single-file self-extracting exe. At first run .NET unpacks
+/// content (including our two cid.dll copies) under AppContext.BaseDirectory
+/// which equals the extract temp folder. DllImport paths are literal
+/// strings that wouldn't normally survive self-extract; we register a
+/// DllImportResolver that rewrites them to absolute paths under the extract
+/// folder, which always works.
 /// </summary>
 public static class CidInterop
 {
+    static CidInterop()
+    {
+        // Rewrite "cidshow_x64/cid.dll" and "cidshow_x86/cid.dll" to absolute
+        // paths in the runtime extract folder. Registered once per process
+        // — NativeLibrary remembers the mapping for subsequent calls.
+        NativeLibrary.SetDllImportResolver(
+            typeof(CidInterop).Assembly,
+            (libraryName, _, _) =>
+            {
+                if (!libraryName.Contains("cid.dll", StringComparison.OrdinalIgnoreCase))
+                    return IntPtr.Zero;
+
+                var normalized = libraryName.Replace('/', Path.DirectorySeparatorChar);
+                var full = Path.Combine(AppContext.BaseDirectory, normalized);
+                return File.Exists(full) ? NativeLibrary.Load(full) : IntPtr.Zero;
+            });
+    }
+
+
     /// <summary>Fires when the device detects an incoming call.</summary>
     public delegate void CallerIdCallback(
         [MarshalAs(UnmanagedType.BStr)] string deviceSerial,

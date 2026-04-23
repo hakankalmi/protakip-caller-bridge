@@ -17,14 +17,10 @@ jobs:
         with:
           dotnet-version: 8.0.x
 
-      - name: Publish (win-x64, self-contained)
+      - name: Publish (win-x64, single-file self-contained)
         run: dotnet publish ProTakipCallerBridge.csproj -c Release -o publish
 
-      - name: Zip
-        shell: pwsh
-        run: Compress-Archive -Path publish/* -DestinationPath ProTakipCallerBridge.zip -Force
-
-      - name: Upload to Hetzner (api.protakip.com/downloads/)
+      - name: Upload exe to Hetzner (api.protakip.com/downloads/)
         shell: pwsh
         env:
           HETZNER_SSH_KEY: ${{ secrets.HETZNER_SSH_KEY }}
@@ -32,10 +28,10 @@ jobs:
           $keyPath = Join-Path $env:RUNNER_TEMP "hetzner_id_ed25519"
           $env:HETZNER_SSH_KEY | Out-File -FilePath $keyPath -Encoding ascii
           icacls $keyPath /inheritance:r /grant:r "$env:USERNAME:(R)" | Out-Null
-          scp -o StrictHostKeyChecking=no -i $keyPath ProTakipCallerBridge.zip root@37.27.203.254:/var/www/html/downloads/ProTakipCallerBridge.zip
+          scp -o StrictHostKeyChecking=no -i $keyPath publish/ProTakipCallerBridge.exe root@37.27.203.254:/var/www/html/downloads/ProTakipCallerBridge.exe
 
       - name: Artifact (always)
         uses: actions/upload-artifact@v4
         with:
           name: ProTakipCallerBridge
-          path: ProTakipCallerBridge.zip
+          path: publish/ProTakipCallerBridge.exe

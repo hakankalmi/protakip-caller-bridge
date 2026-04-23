@@ -14,14 +14,17 @@
     <Product>ProTakip Caller Id</Product>
     <Company>ProTakip</Company>
     <Copyright>© 2026 ProTakip</Copyright>
-    <!-- Self-contained folder publish (~70 MB). Bundles .NET 8 runtime +
-         WinForms + the cidshow x64/x86 native folders. We don't use
-         PublishSingleFile because the vendor DLL's relative path
-         ("cidshow_x64/cid.dll") must be a real on-disk folder at load
-         time — single-file extraction is less predictable for P/Invoke. -->
+    <!-- Single-file self-contained publish → one ProTakipCallerBridge.exe
+         (~70 MB compressed). .NET runtime + native cidshow DLLs are
+         extracted at first run to an app-local temp folder; the exe has
+         zero on-disk dependencies. DllImport resolution is handled at
+         runtime via NativeLibrary.SetDllImportResolver in CidInterop. -->
     <SelfContained>true</SelfContained>
-    <PublishSingleFile>false</PublishSingleFile>
+    <PublishSingleFile>true</PublishSingleFile>
     <PublishTrimmed>false</PublishTrimmed>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <IncludeAllContentForSelfExtract>true</IncludeAllContentForSelfExtract>
+    <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
   </PropertyGroup>
 
