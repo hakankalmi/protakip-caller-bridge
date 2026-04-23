@@ -1,0 +1,49 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <RootNamespace>ProTakipCallerBridge</RootNamespace>
+    <AssemblyName>ProTakipCallerBridge</AssemblyName>
+    <Version>1.0.0</Version>
+    <AssemblyVersion>1.0.0.0</AssemblyVersion>
+    <FileVersion>1.0.0.0</FileVersion>
+    <Product>ProTakip Caller Id</Product>
+    <Company>ProTakip</Company>
+    <Copyright>© 2026 ProTakip</Copyright>
+    <!-- Self-contained folder publish (~70 MB). Bundles .NET 8 runtime +
+         WinForms + the cidshow x64/x86 native folders. We don't use
+         PublishSingleFile because the vendor DLL's relative path
+         ("cidshow_x64/cid.dll") must be a real on-disk folder at load
+         time — single-file extraction is less predictable for P/Invoke. -->
+    <SelfContained>true</SelfContained>
+    <PublishSingleFile>false</PublishSingleFile>
+    <PublishTrimmed>false</PublishTrimmed>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Bridge uses plain HTTPS + Bearer token for /caller-id/ingest. No
+         SignalR on this side — the hub only serves browser clients. -->
+  </ItemGroup>
+
+  <!-- Native caller-id DLLs shipped alongside the exe. Runtime auto-picks
+       x64 or x86 via P/Invoke based on process bitness — we always ship both
+       so the same publish folder works on either. Content Include rather
+       than None Update so the DLLs are picked up even though MSBuild has no
+       prior knowledge of them. -->
+  <ItemGroup>
+    <Content Include="cidshow_x64\cid.dll">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </Content>
+    <Content Include="cidshow_x86\cid.dll">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </Content>
+  </ItemGroup>
+
+</Project>
