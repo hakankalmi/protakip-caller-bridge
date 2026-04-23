@@ -316,8 +316,12 @@ public class PairDialog : Form
         {
             DoubleBuffered = true;
             BackColor = Color.White;
-            Size = new Size(488, 58);
 
+            // Create the inner TextBox BEFORE setting Size. Setting Size on
+            // the panel triggers OnResize, which accesses _inner; if the
+            // field is still null at that point the whole dialog explodes
+            // with a NullReferenceException (observed as "Object reference
+            // not set to an instance of an object" on first launch).
             _inner = new TextBox
             {
                 BorderStyle = BorderStyle.None,
@@ -328,6 +332,7 @@ public class PairDialog : Form
                 ForeColor = AccentPrimary,
                 CharacterCasing = CharacterCasing.Upper,
             };
+            Size = new Size(488, 58);
             _inner.KeyPress += (_, e) =>
             {
                 if (!char.IsControl(e.KeyChar) && !char.IsDigit(e.KeyChar))
@@ -347,6 +352,7 @@ public class PairDialog : Form
         protected override void OnResize(EventArgs e)
         {
             base.OnResize(e);
+            if (_inner == null) return; // base() may fire OnResize before field is set
             // Centre the TextBox. The TextBox only needs enough room for the
             // 6 characters + tracking — let the segment dividers we paint
             // behind do the visual work.
@@ -360,6 +366,7 @@ public class PairDialog : Form
         protected override void OnPaint(PaintEventArgs e)
         {
             base.OnPaint(e);
+            if (_inner == null) return;
             var g = e.Graphics;
             g.SmoothingMode = SmoothingMode.AntiAlias;
 
