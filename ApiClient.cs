@@ -39,6 +39,26 @@ public class ApiClient
         return await resp.Content.ReadFromJsonAsync<ClaimResponse>(cancellationToken: ct);
     }
 
+    /// <summary>
+    /// Heartbeat — bumps the device's LastSeenAt on the server so the web
+    /// panel shows us as "Bağlı" during idle periods. Fire every ~60s.
+    /// </summary>
+    public async Task<bool> PingAsync(CancellationToken ct = default)
+    {
+        if (string.IsNullOrEmpty(_cfg.DeviceToken)) return false;
+        var req = new HttpRequestMessage(HttpMethod.Post, "caller-id/ping");
+        req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _cfg.DeviceToken);
+        try
+        {
+            using var resp = await _http.SendAsync(req, ct);
+            return resp.IsSuccessStatusCode;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
     public async Task<bool> IngestAsync(string phoneNumber, string? line, string? deviceSerial, string? callAt, string? other, CancellationToken ct = default)
     {
         if (string.IsNullOrEmpty(_cfg.DeviceToken)) return false;

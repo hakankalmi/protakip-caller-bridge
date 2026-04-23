@@ -22,6 +22,7 @@ internal static class Program
     private static SynchronizationContext _ui = null!;
     private static string? _lastDeviceSerial;
     private static DateTime _lastSignalAt = DateTime.MinValue;
+    private static System.Threading.Timer? _heartbeatTimer;
 
     private static readonly string LogDir = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
@@ -129,8 +130,25 @@ internal static class Program
                     MessageBoxButtons.OK, MessageBoxIcon.Warning);
             }
 
+            // Heartbeat — every 60s push /caller-id/ping so the web header
+            // indicator stays green during idle periods (no calls for hours).
+            // First tick after 5s so a freshly-paired bridge is immediately
+            // visible as "Bağlı" to the secretary watching the indicator.
+            _heartbeatTimer = new System.Threading.Timer(async _ =>
+            {
+                if (!_cfg.IsPaired) return;
+                try
+                {
+                    var ok = await _api.PingAsync();
+                    if (!ok) Log("Ping returned non-success");
+                }
+                catch (Exception ex) { Log("Ping threw: " + ex.Message); }
+            }, null, TimeSpan.FromSeconds(5), TimeSpan.FromSeconds(60));
+            Log("Heartbeat timer armed (5s initial, 60s interval)");
+
             Log("Entering message loop");
             Application.Run();
+            _heartbeatTimer.Dispose();
             Log("=== Bridge exited normally ===");
         }
         catch (Exception ex)
