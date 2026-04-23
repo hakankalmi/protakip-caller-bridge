@@ -356,8 +356,10 @@ internal static class Program
     private static void Repair()
     {
         _cfg.Clear();
+        _statusForm?.UpdateCompany(null);
         UpdateTrayState();
         ShowPairDialog();
+        _statusForm?.UpdateCompany(_cfg.CompanyName);
         UpdateTrayState();
     }
 
