@@ -3,11 +3,10 @@ using System.ComponentModel;
 namespace ProTakipCallerBridge;
 
 /// <summary>
-/// Bridge tray → "Test çağrısı gönder" seçilince açılan giriş dialog'u.
-/// Kullanıcıdan telefon numarası alır, varsayılan olarak kayıtsız müşteri
-/// test numarasını gösterir ama kullanıcı kendi kayıtlı müşterilerinden
-/// birinin numarasını girerek "kayıtlı müşteri" modal akışını da test
-/// edebilir.
+/// Test çağrısı giriş dialog'u. Tam ekran — DPI scaling ile küçücük kalan
+/// önceki sürümü Hakan onayladı ölçüsünde büyük puntoya geçirdik.
+/// Kullanıcı kayıtlı veya kayıtsız müşteri numarası girerek iki akışı da
+/// test edebilir.
 /// </summary>
 public class TestCallDialog : Form
 {
@@ -17,7 +16,6 @@ public class TestCallDialog : Form
     private static readonly Color TextStrong    = Color.FromArgb(15, 23, 42);
     private static readonly Color TextMuted     = Color.FromArgb(71, 85, 105);
     private static readonly Color InputBg       = Color.FromArgb(248, 250, 252);
-    private static readonly Color BorderSoft    = Color.FromArgb(203, 213, 225);
 
     private readonly TextBox _phoneBox;
     private readonly AccentButton _sendBtn;
@@ -27,45 +25,77 @@ public class TestCallDialog : Form
     public TestCallDialog()
     {
         Text = "ProTakip Caller Id — Test çağrısı";
-        ClientSize = new Size(520, 300);
-        StartPosition = FormStartPosition.CenterScreen;
-        FormBorderStyle = FormBorderStyle.FixedDialog;
-        MaximizeBox = false;
-        MinimizeBox = false;
+        StartPosition = FormStartPosition.Manual;
+        FormBorderStyle = FormBorderStyle.None;
+        WindowState = FormWindowState.Maximized;
         BackColor = Color.White;
-        Font = new Font("Segoe UI", 10f);
+        Font = new Font("Segoe UI", 11f);
         ShowInTaskbar = true;
+        KeyPreview = true;
+        KeyDown += (_, e) => { if (e.KeyCode == Keys.Escape) Close(); };
+
+        // Sağ üstte X
+        var closeBtn = new Button
+        {
+            Text = "×",
+            Font = new Font("Segoe UI", 22f, FontStyle.Bold),
+            FlatStyle = FlatStyle.Flat,
+            Size = new Size(56, 56),
+            ForeColor = TextMuted,
+            BackColor = Color.White,
+            Cursor = Cursors.Hand,
+            TabStop = false,
+        };
+        closeBtn.FlatAppearance.BorderSize = 0;
+        closeBtn.Click += (_, __) => Close();
+        Controls.Add(closeBtn);
+        closeBtn.Location = new Point(Screen.PrimaryScreen!.WorkingArea.Width - 72, 16);
+        closeBtn.Anchor = AnchorStyles.Top | AnchorStyles.Right;
+
+        var root = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = 3,
+            RowCount = 1,
+            BackColor = Color.White,
+        };
+        root.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
+        root.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 720));
+        root.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
+        Controls.Add(root);
+        root.SendToBack();
 
         var stack = new FlowLayoutPanel
         {
             Dock = DockStyle.Fill,
             FlowDirection = FlowDirection.TopDown,
             WrapContents = false,
+            AutoScroll = true,
             BackColor = Color.White,
-            Padding = new Padding(40, 32, 40, 24),
+            Padding = new Padding(32, 120, 32, 32),
         };
-        Controls.Add(stack);
+        root.Controls.Add(stack, 1, 0);
 
         var title = new Label
         {
             Text = "Test Çağrısı",
             AutoSize = true,
-            Font = new Font("Segoe UI", 16f, FontStyle.Bold),
+            Font = new Font("Segoe UI", 36f, FontStyle.Bold),
             ForeColor = AccentPrimary,
-            Margin = new Padding(0, 0, 0, 8),
+            Margin = new Padding(0, 0, 0, 20),
         };
         stack.Controls.Add(title);
 
         var instr = new Label
         {
-            Text = "Web panelde göstereceğimiz numarayı girin.\n"
-                 + "Kayıtlı bir müşterinin numarasını girerseniz müşteri\n"
-                 + "kartı açılır, kayıtsız bir numara girerseniz yeni kayıt\n"
-                 + "butonu belirir.",
+            Text = "Web panelde göstereceğimiz numarayı girin.\n\n"
+                 + "Kayıtlı bir müşterinin numarasını girerseniz müşteri kartı açılır.\n"
+                 + "Kayıtsız bir numara girerseniz yeni kayıt butonu belirir.",
             AutoSize = true,
+            MaximumSize = new Size(656, 0),
             ForeColor = TextMuted,
-            Font = new Font("Segoe UI", 9.5f),
-            Margin = new Padding(0, 0, 0, 20),
+            Font = new Font("Segoe UI", 13f),
+            Margin = new Padding(0, 0, 0, 48),
         };
         stack.Controls.Add(instr);
 
@@ -74,27 +104,26 @@ public class TestCallDialog : Form
             Text = "Telefon numarası",
             AutoSize = true,
             ForeColor = TextStrong,
-            Font = new Font("Segoe UI", 9.5f, FontStyle.Bold),
-            Margin = new Padding(0, 0, 0, 6),
+            Font = new Font("Segoe UI", 13f, FontStyle.Bold),
+            Margin = new Padding(0, 0, 0, 12),
         };
         stack.Controls.Add(label);
 
         _phoneBox = new TextBox
         {
             BorderStyle = BorderStyle.FixedSingle,
-            Font = new Font("Consolas", 18f, FontStyle.Bold),
+            Font = new Font("Consolas", 32f, FontStyle.Bold),
             TextAlign = HorizontalAlignment.Left,
             BackColor = InputBg,
             ForeColor = TextStrong,
-            Size = new Size(440, 48),
+            Size = new Size(656, 80),
             MaxLength = 20,
             Text = "05551112233",
-            Margin = new Padding(0, 0, 0, 18),
+            Margin = new Padding(0, 0, 0, 32),
         };
         _phoneBox.KeyPress += (_, e) =>
         {
             if (char.IsControl(e.KeyChar)) return;
-            // Numeric, +, space, -, parentheses — enough for any sane phone number format.
             if (!char.IsDigit(e.KeyChar) && "+- ()".IndexOf(e.KeyChar) < 0)
                 e.Handled = true;
         };
@@ -103,7 +132,7 @@ public class TestCallDialog : Form
         _sendBtn = new AccentButton
         {
             Text = "GÖNDER",
-            Size = new Size(440, 48),
+            Size = new Size(656, 72),
             Margin = new Padding(0),
         };
         _sendBtn.Click += (_, __) =>
@@ -134,7 +163,7 @@ public class TestCallDialog : Form
             FlatAppearance.BorderSize = 0;
             BackColor = AccentPrimary;
             ForeColor = Color.White;
-            Font = new Font("Segoe UI", 11f, FontStyle.Bold);
+            Font = new Font("Segoe UI", 14f, FontStyle.Bold);
             Cursor = Cursors.Hand;
             UseVisualStyleBackColor = false;
         }

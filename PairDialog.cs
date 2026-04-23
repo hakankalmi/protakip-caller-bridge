@@ -57,81 +57,114 @@ public class PairDialog : Form
         _api = api;
         _cfg = cfg;
 
+        // Tam ekran maximized — DPI scaling'le küçücük kalan önceki sürüm
+        // sekreterlerin gözünü ağrıtıyordu. Artık başlık çubuğu yok, tüm
+        // ekran doluyor, içerik merkezi bir sütunda büyük punto.
         Text = "ProTakip Caller Id";
-        ClientSize = new Size(680, 520);
-        StartPosition = FormStartPosition.CenterScreen;
-        FormBorderStyle = FormBorderStyle.FixedDialog;
-        MaximizeBox = false;
-        MinimizeBox = false;
+        StartPosition = FormStartPosition.Manual;
+        FormBorderStyle = FormBorderStyle.None;
+        WindowState = FormWindowState.Maximized;
         BackColor = Color.White;
-        Font = new Font("Segoe UI", 10.25f);
+        Font = new Font("Segoe UI", 11f);
         ShowInTaskbar = true;
+        KeyPreview = true;
+        KeyDown += (_, e) => { if (e.KeyCode == Keys.Escape) Close(); };
 
-        // A single vertical stack — every control lays itself out from top
-        // to bottom with its own top-margin. No absolute positioning, no
-        // docking overlap.
+        // Sağ üstte büyük X ile kapatma butonu (form border'ı yok).
+        var closeBtn = new Button
+        {
+            Text = "×",
+            Font = new Font("Segoe UI", 22f, FontStyle.Bold),
+            FlatStyle = FlatStyle.Flat,
+            Size = new Size(56, 56),
+            ForeColor = TextMuted,
+            BackColor = Color.White,
+            Cursor = Cursors.Hand,
+            TabStop = false,
+        };
+        closeBtn.FlatAppearance.BorderSize = 0;
+        closeBtn.Click += (_, __) => Close();
+        Controls.Add(closeBtn);
+        closeBtn.Location = new Point(Screen.PrimaryScreen!.WorkingArea.Width - 72, 16);
+        closeBtn.Anchor = AnchorStyles.Top | AnchorStyles.Right;
+
+        // İçerik merkezi dikey akış — maksimum 720px genişlikte, ekran
+        // ortalanmış. TableLayoutPanel ortada tek kolon.
+        var root = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = 3,
+            RowCount = 1,
+            BackColor = Color.White,
+        };
+        root.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
+        root.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 720));
+        root.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
+        Controls.Add(root);
+        root.SendToBack();
+
         var stack = new FlowLayoutPanel
         {
             Dock = DockStyle.Fill,
             FlowDirection = FlowDirection.TopDown,
             WrapContents = false,
-            AutoScroll = false,
+            AutoScroll = true,
             BackColor = Color.White,
-            Padding = new Padding(56, 40, 56, 32),
+            Padding = new Padding(32, 80, 32, 32),
         };
-        Controls.Add(stack);
+        root.Controls.Add(stack, 1, 0);
 
-        // ── Title ──────────────────────────────────────────────────
+        // Title — big bold mavi, tam ekran için 36pt
         var title = new Label
         {
             Text = "Köprü Eşleştirme",
             AutoSize = true,
-            Font = new Font("Segoe UI", 18f, FontStyle.Bold),
+            Font = new Font("Segoe UI", 36f, FontStyle.Bold),
             ForeColor = AccentPrimary,
-            Margin = new Padding(0, 0, 0, 12),
+            Margin = new Padding(0, 0, 0, 20),
         };
         stack.Controls.Add(title);
 
-        // ── Instruction paragraph ──────────────────────────────────
+        // Instruction paragraph — büyük font, genişlik tam
         var instr = new Label
         {
-            Text = "Sekreter bilgisayarınızı ProTakip hesabınıza bağlıyorsunuz. "
+            Text = "Sekreter bilgisayarınızı ProTakip hesabınıza bağlıyorsunuz.\n\n"
                  + "app.protakip.com'da sağ üstteki Caller ID göstergesine tıklayın, "
                  + "\"USB Cihaz\" seçip çıkan 6 haneli eşleşme kodunu aşağıya girin.",
             AutoSize = true,
-            MaximumSize = new Size(568, 0), // 680 - 56*2 = 568 → wraps inside padding
-            Font = new Font("Segoe UI", 10.5f),
+            MaximumSize = new Size(656, 0),
+            Font = new Font("Segoe UI", 13f),
             ForeColor = TextStrong,
-            Margin = new Padding(0, 0, 0, 24),
+            Margin = new Padding(0, 0, 0, 48),
         };
         stack.Controls.Add(instr);
 
-        // ── 6-digit code entry row ─────────────────────────────────
+        // 6-digit code entry row
         var codeRow = BuildCodeEntry();
-        codeRow.Margin = new Padding(0, 0, 0, 24);
+        codeRow.Margin = new Padding(0, 0, 0, 40);
         stack.Controls.Add(codeRow);
 
-        // ── Pair button ────────────────────────────────────────────
+        // Pair button — büyük
         _pairBtn = new AccentButton
         {
             Text = "EŞLEŞTİR",
-            Size = new Size(568, 52),
+            Size = new Size(656, 72),
             Enabled = false,
-            Margin = new Padding(0, 0, 0, 16),
+            Margin = new Padding(0, 0, 0, 24),
         };
         _pairBtn.Click += async (_, __) => await DoPairAsync();
         stack.Controls.Add(_pairBtn);
 
-        // ── Status label ───────────────────────────────────────────
+        // Status label
         _statusLabel = new Label
         {
             AutoSize = false,
-            Size = new Size(568, 24),
+            Size = new Size(656, 36),
             TextAlign = ContentAlignment.MiddleCenter,
-            Font = new Font("Segoe UI", 10f),
+            Font = new Font("Segoe UI", 13f),
             ForeColor = TextMuted,
             Text = "",
-            Margin = new Padding(0, 0, 0, 8),
+            Margin = new Padding(0, 0, 0, 12),
         };
         stack.Controls.Add(_statusLabel);
 
@@ -184,14 +217,16 @@ public class PairDialog : Form
 
     private Panel BuildCodeEntry()
     {
-        const int slotW = 78;
-        const int slotH = 72;
-        const int gap = 12;
+        // Tam ekran boyutlarda slot'lar büyük — her rakam 6 cm'den büyük
+        // monitor'de açıkça okunuyor.
+        const int slotW = 96;
+        const int slotH = 108;
+        const int gap = 16;
         int totalW = 6 * slotW + 5 * gap;
 
         var row = new Panel
         {
-            Size = new Size(568, slotH + 4),
+            Size = new Size(656, slotH + 4),
             BackColor = Color.White,
         };
 
@@ -202,7 +237,7 @@ public class PairDialog : Form
             var box = new TextBox
             {
                 BorderStyle = BorderStyle.FixedSingle,
-                Font = new Font("Segoe UI", 26f, FontStyle.Bold),
+                Font = new Font("Segoe UI", 42f, FontStyle.Bold),
                 TextAlign = HorizontalAlignment.Center,
                 MaxLength = 1,
                 BackColor = InputBg,
