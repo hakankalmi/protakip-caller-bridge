@@ -2,6 +2,7 @@ bin/
 obj/
 publish/
 dist/
+.ci-keys/
 *.user
 *.suo
 .vs/
