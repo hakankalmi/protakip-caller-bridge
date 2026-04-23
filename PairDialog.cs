@@ -3,49 +3,47 @@ using System.ComponentModel;
 namespace ProTakipCallerBridge;
 
 /// <summary>
-/// First-run pair screen. Simple, clean WinForms layout — no owner-drawn
-/// controls, no overlapping docked/absolute children (which was what made
-/// the previous version look like two dialogs glued together). Everything
-/// lives inside a root <see cref="TableLayoutPanel"/> so Windows handles
-/// DPI scaling and nothing needs manual coordinates.
+/// First-run pair screen — deliberately plain. Previous attempts stacked
+/// a custom gradient header on top of docked + absolute children and the
+/// DPI scaler ate half the geometry. This version:
 ///
-///   ┌──────────────────────────────────────────────┐
-///   │            [ solid-blue header ]             │
-///   │          ProTakip Caller Id                  │
-///   │          Köprü eşleştirme                    │
-///   ├──────────────────────────────────────────────┤
-///   │                                               │
-///   │   Sekreter PC'nizi ProTakip hesabınıza       │
-///   │   bağlıyorsunuz. app.protakip.com'da sağ     │
-///   │   üstteki Caller ID göstergesine tıklayın,   │
-///   │   "USB Cihaz" seçip çıkan 6 haneli kodu      │
-///   │   aşağıya girin.                              │
-///   │                                               │
-///   │   ┌──┬──┬──┬──┬──┬──┐                        │
-///   │   │  │  │  │  │  │  │   ← 6 ayrı TextBox    │
-///   │   └──┴──┴──┴──┴──┴──┘                        │
-///   │                                               │
-///   │   ┌────────────────────────────┐             │
-///   │   │         EŞLEŞTİR            │             │
-///   │   └────────────────────────────┘             │
-///   │                                               │
-///   │   status line                                │
-///   │   app.protakip.com'u aç →                    │
-///   └──────────────────────────────────────────────┘
+///   - Uses the OS's native title bar (no custom header strip).
+///   - Puts all content inside a single vertical <c>FlowLayoutPanel</c>
+///     so every child measures itself and Windows handles DPI.
+///   - No owner-drawn anything except the accent button.
+///
+/// Final visual:
+///
+///   ╔═ ProTakip Caller Id ═══════════════════╗
+///   ║                                         ║
+///   ║   Köprü Eşleştirme                      ║   ← 18pt bold, blue
+///   ║                                         ║
+///   ║   Sekreter bilgisayarınızı ProTakip     ║
+///   ║   hesabınıza bağlıyorsunuz. app.         ║
+///   ║   protakip.com'da sağ üstteki Caller    ║
+///   ║   ID göstergesine tıklayın, "USB        ║
+///   ║   Cihaz" seçip çıkan 6 haneli kodu      ║
+///   ║   aşağıya girin.                         ║
+///   ║                                         ║
+///   ║   [  ][  ][  ][  ][  ][  ]              ║   ← 6 TextBoxes
+///   ║                                         ║
+///   ║   [       EŞLEŞTİR       ]              ║   ← big blue button
+///   ║                                         ║
+///   ║   status-line                            ║
+///   ║   app.protakip.com'u aç →                ║
+///   ╚═════════════════════════════════════════╝
 /// </summary>
 public class PairDialog : Form
 {
-    // Color palette — matches the web panel so the bridge feels like the
-    // same product. Keep simple: one accent blue + one text gray.
     private static readonly Color AccentPrimary = Color.FromArgb(37, 99, 235);   // blue-600
     private static readonly Color AccentHover   = Color.FromArgb(29, 78, 216);   // blue-700
     private static readonly Color AccentPressed = Color.FromArgb(30, 64, 175);   // blue-800
     private static readonly Color TextStrong    = Color.FromArgb(15, 23, 42);    // slate-900
     private static readonly Color TextMuted     = Color.FromArgb(71, 85, 105);   // slate-600
-    private static readonly Color TextLight     = Color.FromArgb(148, 163, 184); // slate-400
+    private static readonly Color Disabled      = Color.FromArgb(148, 163, 184); // slate-400
     private static readonly Color Success       = Color.FromArgb(22, 163, 74);   // green-600
-    private static readonly Color Error         = Color.FromArgb(220, 38, 38);   // red-600
-    private static readonly Color BorderSoft    = Color.FromArgb(203, 213, 225); // slate-300
+    private static readonly Color ErrorColor    = Color.FromArgb(220, 38, 38);   // red-600
+    private static readonly Color InputBg       = Color.FromArgb(248, 250, 252); // slate-50
 
     private readonly ApiClient _api;
     private readonly BridgeConfig _cfg;
@@ -60,102 +58,100 @@ public class PairDialog : Form
         _cfg = cfg;
 
         Text = "ProTakip Caller Id";
-        ClientSize = new Size(720, 560);
+        ClientSize = new Size(680, 520);
         StartPosition = FormStartPosition.CenterScreen;
         FormBorderStyle = FormBorderStyle.FixedDialog;
         MaximizeBox = false;
         MinimizeBox = false;
         BackColor = Color.White;
-        Font = new Font("Segoe UI", 10f);
+        Font = new Font("Segoe UI", 10.25f);
         ShowInTaskbar = true;
-        AutoScaleMode = AutoScaleMode.Font;
 
-        // ── Root table: 4 rows (header / body / actions / footer) ──
-        var root = new TableLayoutPanel
+        // A single vertical stack — every control lays itself out from top
+        // to bottom with its own top-margin. No absolute positioning, no
+        // docking overlap.
+        var stack = new FlowLayoutPanel
         {
             Dock = DockStyle.Fill,
-            ColumnCount = 1,
-            RowCount = 4,
+            FlowDirection = FlowDirection.TopDown,
+            WrapContents = false,
+            AutoScroll = false,
             BackColor = Color.White,
+            Padding = new Padding(56, 40, 56, 32),
         };
-        root.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 130)); // header
-        root.RowStyles.Add(new RowStyle(SizeType.AutoSize));      // body (instruction + inputs)
-        root.RowStyles.Add(new RowStyle(SizeType.AutoSize));      // button + status
-        root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));  // footer spacer + link
-        Controls.Add(root);
+        Controls.Add(stack);
 
-        // ── Row 0: header ──────────────────────────────────────────
-        root.Controls.Add(BuildHeader(), 0, 0);
-
-        // ── Row 1: instruction + code entry ────────────────────────
-        var body = new Panel
+        // ── Title ──────────────────────────────────────────────────
+        var title = new Label
         {
-            Dock = DockStyle.Top,
+            Text = "Köprü Eşleştirme",
             AutoSize = true,
-            Padding = new Padding(56, 24, 56, 0),
-            BackColor = Color.White,
+            Font = new Font("Segoe UI", 18f, FontStyle.Bold),
+            ForeColor = AccentPrimary,
+            Margin = new Padding(0, 0, 0, 12),
         };
-        body.Controls.Add(BuildInstructionLabel());
-        body.Controls.Add(BuildCodeEntry());
-        root.Controls.Add(body, 0, 1);
+        stack.Controls.Add(title);
 
-        // ── Row 2: pair button ─────────────────────────────────────
+        // ── Instruction paragraph ──────────────────────────────────
+        var instr = new Label
+        {
+            Text = "Sekreter bilgisayarınızı ProTakip hesabınıza bağlıyorsunuz. "
+                 + "app.protakip.com'da sağ üstteki Caller ID göstergesine tıklayın, "
+                 + "\"USB Cihaz\" seçip çıkan 6 haneli eşleşme kodunu aşağıya girin.",
+            AutoSize = true,
+            MaximumSize = new Size(568, 0), // 680 - 56*2 = 568 → wraps inside padding
+            Font = new Font("Segoe UI", 10.5f),
+            ForeColor = TextStrong,
+            Margin = new Padding(0, 0, 0, 24),
+        };
+        stack.Controls.Add(instr);
+
+        // ── 6-digit code entry row ─────────────────────────────────
+        var codeRow = BuildCodeEntry();
+        codeRow.Margin = new Padding(0, 0, 0, 24);
+        stack.Controls.Add(codeRow);
+
+        // ── Pair button ────────────────────────────────────────────
         _pairBtn = new AccentButton
         {
-            Text = "Eşleştir",
-            Size = new Size(420, 52),
-            Anchor = AnchorStyles.None,
+            Text = "EŞLEŞTİR",
+            Size = new Size(568, 52),
             Enabled = false,
-            Margin = new Padding(56, 8, 56, 4),
+            Margin = new Padding(0, 0, 0, 16),
         };
         _pairBtn.Click += async (_, __) => await DoPairAsync();
-        var btnHost = new TableLayoutPanel
-        {
-            Dock = DockStyle.Top,
-            ColumnCount = 1,
-            RowCount = 1,
-            AutoSize = true,
-            BackColor = Color.White,
-        };
-        btnHost.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        btnHost.Controls.Add(_pairBtn, 0, 0);
-        root.Controls.Add(btnHost, 0, 2);
+        stack.Controls.Add(_pairBtn);
 
-        // ── Row 3: status + link at bottom ─────────────────────────
-        var footer = new TableLayoutPanel
-        {
-            Dock = DockStyle.Fill,
-            ColumnCount = 1,
-            RowCount = 2,
-            BackColor = Color.White,
-        };
-        footer.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        footer.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        footer.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-
+        // ── Status label ───────────────────────────────────────────
         _statusLabel = new Label
         {
-            Dock = DockStyle.Top,
-            Height = 22,
+            AutoSize = false,
+            Size = new Size(568, 24),
             TextAlign = ContentAlignment.MiddleCenter,
+            Font = new Font("Segoe UI", 10f),
             ForeColor = TextMuted,
-            Font = new Font("Segoe UI", 9.5f),
             Text = "",
+            Margin = new Padding(0, 0, 0, 8),
         };
-        footer.Controls.Add(_statusLabel, 0, 0);
+        stack.Controls.Add(_statusLabel);
 
-        var linkHost = new Panel { Dock = DockStyle.Fill, BackColor = Color.White };
-        var openWebLink = new LinkLabel
+        // ── Open web link ──────────────────────────────────────────
+        var linkWrap = new Panel
+        {
+            Size = new Size(568, 24),
+            BackColor = Color.White,
+            Margin = new Padding(0),
+        };
+        var link = new LinkLabel
         {
             Text = "app.protakip.com'u aç",
             AutoSize = true,
+            Font = new Font("Segoe UI", 10f),
             LinkColor = AccentPrimary,
             ActiveLinkColor = AccentPressed,
             LinkBehavior = LinkBehavior.HoverUnderline,
-            Font = new Font("Segoe UI", 9.5f),
         };
-        openWebLink.LinkClicked += (_, __) =>
+        link.LinkClicked += (_, __) =>
         {
             try
             {
@@ -165,114 +161,57 @@ public class PairDialog : Form
                     UseShellExecute = true,
                 });
             }
-            catch { /* no default browser */ }
+            catch { /* browser not installed */ }
         };
-        linkHost.Controls.Add(openWebLink);
-        linkHost.Resize += (_, __) =>
+        linkWrap.Controls.Add(link);
+        linkWrap.Resize += (_, __) =>
         {
-            openWebLink.Location = new Point(
-                (linkHost.Width - openWebLink.Width) / 2,
-                linkHost.Height - openWebLink.Height - 24);
+            link.Location = new Point((linkWrap.Width - link.Width) / 2, 0);
         };
-        footer.Controls.Add(linkHost, 0, 1);
-
-        root.Controls.Add(footer, 0, 3);
+        stack.Controls.Add(linkWrap);
 
         AcceptButton = _pairBtn;
-        Load += (_, __) => _digits[0].Focus();
-    }
-
-    // ── Header ──────────────────────────────────────────────────────
-
-    private static Panel BuildHeader()
-    {
-        // Solid dark-blue strip (no gradient, no owner-drawing). Two labels
-        // stacked inside with generous padding on top so the headline
-        // doesn't collide with the window titlebar.
-        var panel = new Panel { Dock = DockStyle.Fill, BackColor = AccentPrimary };
-        var stack = new TableLayoutPanel
+        Load += (_, __) =>
         {
-            Dock = DockStyle.Fill,
-            ColumnCount = 1,
-            RowCount = 2,
-            BackColor = AccentPrimary,
-            Padding = new Padding(48, 28, 48, 0),
-        };
-        stack.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        stack.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        stack.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-
-        var title = new Label
-        {
-            Text = "ProTakip Caller Id",
-            Font = new Font("Segoe UI", 20f, FontStyle.Bold),
-            ForeColor = Color.White,
-            AutoSize = true,
-            Margin = new Padding(0, 0, 0, 4),
-        };
-        var subtitle = new Label
-        {
-            Text = "Köprü eşleştirme",
-            Font = new Font("Segoe UI", 11f),
-            ForeColor = Color.FromArgb(219, 234, 254), // blue-100
-            AutoSize = true,
-        };
-        stack.Controls.Add(title, 0, 0);
-        stack.Controls.Add(subtitle, 0, 1);
-        panel.Controls.Add(stack);
-        return panel;
-    }
-
-    // ── Body: instruction + code entry ──────────────────────────────
-
-    private Label BuildInstructionLabel()
-    {
-        return new Label
-        {
-            Text = "Sekreter bilgisayarınızı ProTakip hesabınıza bağlıyorsunuz.\n"
-                 + "app.protakip.com'da sağ üstteki Caller ID göstergesine tıklayın, "
-                 + "\"USB Cihaz\" seçip çıkan 6 haneli eşleşme kodunu aşağıya girin.",
-            AutoSize = false,
-            Dock = DockStyle.Top,
-            Height = 72,
-            ForeColor = TextStrong,
-            Font = new Font("Segoe UI", 10.25f),
+            _digits[0].Focus();
+            // Force-centre link once everything is laid out.
+            foreach (Control c in linkWrap.Controls) c.Location =
+                new Point((linkWrap.Width - c.Width) / 2, 0);
         };
     }
+
+    // ── Code entry row ──────────────────────────────────────────────
 
     private Panel BuildCodeEntry()
     {
-        // Six individual TextBoxes centred on a row. One box per digit is
-        // kilometres more robust than fake painted dividers over a single
-        // TextBox — Ctrl+V still works via a paste handler on the first box.
+        const int slotW = 78;
+        const int slotH = 72;
+        const int gap = 12;
+        int totalW = 6 * slotW + 5 * gap;
+
         var row = new Panel
         {
-            Dock = DockStyle.Top,
-            Height = 88,
+            Size = new Size(568, slotH + 4),
             BackColor = Color.White,
         };
 
-        var slotW = 68;
-        var slotH = 72;
-        var gap = 10;
-        var totalW = 6 * slotW + 5 * gap;
-        var startX = (608 - totalW) / 2; // 608 = body inner width (720 - 56*2)
+        int startX = (row.Width - totalW) / 2;
 
         for (int i = 0; i < 6; i++)
         {
             var box = new TextBox
             {
                 BorderStyle = BorderStyle.FixedSingle,
-                Font = new Font("Segoe UI", 28f, FontStyle.Bold),
+                Font = new Font("Segoe UI", 26f, FontStyle.Bold),
                 TextAlign = HorizontalAlignment.Center,
                 MaxLength = 1,
-                BackColor = Color.FromArgb(248, 250, 252), // slate-50
+                BackColor = InputBg,
                 ForeColor = AccentPrimary,
                 Size = new Size(slotW, slotH),
-                Location = new Point(startX + i * (slotW + gap), 8),
-                Tag = i,
+                Location = new Point(startX + i * (slotW + gap), 0),
             };
             int idx = i;
+
             box.KeyPress += (_, e) =>
             {
                 if (char.IsControl(e.KeyChar)) return;
@@ -296,7 +235,8 @@ public class PairDialog : Form
                     _digits[idx - 1].Focus();
                     e.Handled = true;
                 }
-                else if (e.KeyCode == Keys.Right && idx < 5 && box.SelectionStart == box.Text.Length)
+                else if (e.KeyCode == Keys.Right && idx < 5 &&
+                         box.SelectionStart == box.Text.Length)
                 {
                     _digits[idx + 1].Focus();
                     e.Handled = true;
@@ -351,8 +291,8 @@ public class PairDialog : Form
             var res = await _api.ClaimAsync(code, deviceSerial: null);
             if (res == null)
             {
-                _statusLabel.ForeColor = Error;
-                _statusLabel.Text = "Kod geçersiz veya süresi dolmuş. Web panelde yeni kod alın.";
+                _statusLabel.ForeColor = ErrorColor;
+                _statusLabel.Text = "Kod geçersiz veya süresi dolmuş. Web panelden yeni kod alın.";
                 foreach (var d in _digits) { d.Enabled = true; d.Text = ""; }
                 _digits[0].Focus();
                 UpdateButtonState();
@@ -374,7 +314,7 @@ public class PairDialog : Form
         }
         catch (Exception ex)
         {
-            _statusLabel.ForeColor = Error;
+            _statusLabel.ForeColor = ErrorColor;
             _statusLabel.Text = "Bağlantı hatası: " + ex.Message;
             foreach (var d in _digits) d.Enabled = true;
             UpdateButtonState();
@@ -383,9 +323,7 @@ public class PairDialog : Form
 
     protected override void OnClosing(CancelEventArgs e) => base.OnClosing(e);
 
-    // ───────────────────────────────────────────────────────────────
-    //  Nested: owner-drawn button — flat blue with hover/press tints.
-    // ───────────────────────────────────────────────────────────────
+    // ── Accent button (minimal owner-draw: background colour + text) ────
 
     private sealed class AccentButton : Button
     {
@@ -403,24 +341,31 @@ public class PairDialog : Form
             UseVisualStyleBackColor = false;
         }
 
-        protected override void OnMouseEnter(EventArgs e) { base.OnMouseEnter(e); _hover = true; Refresh(); }
-        protected override void OnMouseLeave(EventArgs e) { base.OnMouseLeave(e); _hover = false; _down = false; Refresh(); }
-        protected override void OnMouseDown(MouseEventArgs e) { base.OnMouseDown(e); _down = true; Refresh(); }
-        protected override void OnMouseUp(MouseEventArgs e) { base.OnMouseUp(e); _down = false; Refresh(); }
+        protected override void OnMouseEnter(EventArgs e) { base.OnMouseEnter(e); _hover = true; Invalidate(); }
+        protected override void OnMouseLeave(EventArgs e) { base.OnMouseLeave(e); _hover = false; _down = false; Invalidate(); }
+        protected override void OnMouseDown(MouseEventArgs e) { base.OnMouseDown(e); _down = true; Invalidate(); }
+        protected override void OnMouseUp(MouseEventArgs e) { base.OnMouseUp(e); _down = false; Invalidate(); }
+
+        protected override void OnEnabledChanged(EventArgs e)
+        {
+            base.OnEnabledChanged(e);
+            Invalidate();
+        }
 
         protected override void OnPaint(PaintEventArgs e)
         {
             var g = e.Graphics;
             Color bg;
-            if (!Enabled)       bg = BorderSoft;
+            Color fg = Color.White;
+            if (!Enabled)       { bg = Disabled; fg = Color.WhiteSmoke; }
             else if (_down)     bg = AccentPressed;
             else if (_hover)    bg = AccentHover;
             else                bg = AccentPrimary;
 
             g.Clear(bg);
-            TextRenderer.DrawText(g, Text, Font, ClientRectangle,
-                Enabled ? Color.White : Color.FromArgb(100, 116, 139),
-                TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
+            TextRenderer.DrawText(g, Text, Font, ClientRectangle, fg,
+                TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter |
+                TextFormatFlags.SingleLine);
         }
     }
 }
