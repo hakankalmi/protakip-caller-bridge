@@ -350,20 +350,34 @@ internal static class Program
             return;
         }
 
+        // Ask the user for a phone number so they can test both the
+        // "kayıtlı müşteri" and the "kayıtsız müşteri" flows. Previous
+        // version hard-coded 05551112233 which only ever hit the
+        // unknown-caller path.
+        using var dlg = new TestCallDialog();
+        dlg.TopMost = true;
+        dlg.Shown += (_, __) => { dlg.Activate(); dlg.BringToFront(); dlg.TopMost = false; };
+        if (dlg.ShowDialog() != DialogResult.OK) return;
+        var phone = dlg.PhoneNumber;
+        if (string.IsNullOrWhiteSpace(phone)) return;
+
         var ok = await _api.IngestAsync(
-            phoneNumber: "05551112233",
+            phoneNumber: phone,
             line: "TEST",
             deviceSerial: _lastDeviceSerial ?? "TEST-SERIAL",
             callAt: DateTime.UtcNow.ToString("O"),
             other: "bridge-manual-test");
 
-        MessageBox.Show(
-            ok
-                ? "Test çağrısı gönderildi. Tarayıcıya düşmesi lazım."
-                : "Gönderilemedi. Bağlantıyı kontrol edin.",
-            "ProTakip Caller Id",
-            MessageBoxButtons.OK,
-            ok ? MessageBoxIcon.Information : MessageBoxIcon.Warning);
+        if (!ok)
+        {
+            MessageBox.Show(
+                "Gönderilemedi. Bağlantıyı kontrol edin.",
+                "ProTakip Caller Id",
+                MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
+        // Başarılı durumda dialog zaten kapalı; web panelde sağ üstte kart
+        // patlayacak, ek bir bildirim kullanıcıyı rahatsız etmesin diye
+        // MessageBox göstermiyoruz.
     }
 
     // ── Auto-start ──────────────────────────────────────────────────────
