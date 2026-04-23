@@ -66,6 +66,11 @@ public class PairDialog : Form
         BackColor = Color.White;
         Font = new Font("Segoe UI", 9.75f);
         DoubleBuffered = true;
+        // ShowInTaskbar keeps the dialog discoverable even if it opens behind
+        // the browser — user can Alt+Tab or click the taskbar entry to raise
+        // it. Critical on Windows 11 where freshly-launched exe's from
+        // Defender's "Run anyway" flow often don't get foreground focus.
+        ShowInTaskbar = true;
 
         // ── Header ──────────────────────────────────────────────────
         var header = new HeaderPanel { Dock = DockStyle.Top, Height = 96 };
