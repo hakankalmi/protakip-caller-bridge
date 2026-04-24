@@ -22,13 +22,29 @@ jobs:
 
       - name: Upload exe to Hetzner (api.protakip.com/downloads/)
         shell: pwsh
+        timeout-minutes: 3
         env:
           HETZNER_SSH_KEY: ${{ secrets.HETZNER_SSH_KEY }}
         run: |
           $keyPath = Join-Path $env:RUNNER_TEMP "hetzner_id_ed25519"
-          $env:HETZNER_SSH_KEY | Out-File -FilePath $keyPath -Encoding ascii
+          # PowerShell'in default Out-File UTF-16 BOM ekliyor, ssh key'i
+          # bozuluyor. System.IO.File.WriteAllText + ASCII encoding ile
+          # saf ASCII dosya yaz.
+          [System.IO.File]::WriteAllText($keyPath, $env:HETZNER_SSH_KEY, [System.Text.Encoding]::ASCII)
           icacls $keyPath /inheritance:r /grant:r "$env:USERNAME:(R)" | Out-Null
-          scp -o StrictHostKeyChecking=no -i $keyPath publish/ProTakipCallerBridge.exe root@37.27.203.254:/var/www/html/downloads/ProTakipCallerBridge.exe
+
+          # Timeout + batch mode: şifre prompt'u çıkarsa anında fail.
+          # Tek denemede bağlanamazsa 15sn içinde hata ver, step timeout'u
+          # da 3dk ile sınırlı → step sonsuza kadar asılı kalmıyor.
+          scp `
+            -o StrictHostKeyChecking=no `
+            -o ConnectTimeout=15 `
+            -o BatchMode=yes `
+            -o ServerAliveInterval=10 `
+            -o ServerAliveCountMax=3 `
+            -i $keyPath `
+            publish/ProTakipCallerBridge.exe `
+            root@37.27.203.254:/var/www/html/downloads/ProTakipCallerBridge.exe
 
       - name: Artifact (always)
         uses: actions/upload-artifact@v4
