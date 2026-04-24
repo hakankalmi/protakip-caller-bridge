@@ -152,15 +152,7 @@ namespace ProTakipCallerBridgeCom
                 Location = new Point(540, 91),
                 Size = new Size(88, 25),
             };
-            _saveTokenBtn.Click += (_, __) =>
-            {
-                _deviceToken = _tokenBox.Text.Trim();
-                SaveConfig();
-                AppendLog("Token kaydedildi (" + _deviceToken.Length + " karakter)");
-                _statusLabel.Text = string.IsNullOrEmpty(_deviceToken)
-                    ? "Token gerekli — yapıştırıp Kaydet'e basın"
-                    : "Dinleniyor";
-            };
+            _saveTokenBtn.Click += (_, __) => OnSaveClicked();
             Controls.Add(_saveTokenBtn);
 
             _logList = new ListBox
@@ -176,14 +168,223 @@ namespace ProTakipCallerBridgeCom
             AppendLog("Config: " + ConfigPath);
             AppendLog("Log: " + LogPath);
 
-            _statusLabel.Text = string.IsNullOrEmpty(_deviceToken)
-                ? "Token gerekli — yapıştırıp Kaydet'e basın"
-                : "Dinleniyor";
+            UpdateStatusLabel();
 
             // ActiveX'ten cihaz bilgisi alıp her saniye status güncelle.
             var tick = new Timer { Interval = 1000 };
             tick.Tick += (_, __) => RefreshDeviceStatus();
             tick.Start();
+
+            // Heartbeat — 60 saniyede bir /caller-id/ping. Web panelin
+            // "Caller ID: Bağlı" göstermesi buna bağlı. İlk ping'i 3 sn sonra
+            // at ki token kaydedildikten sonra hemen bağlantı durumu gözüksün.
+            _pingTimer = new Timer { Interval = 3000 };
+            _pingTimer.Tick += (_, __) =>
+            {
+                _pingTimer.Interval = 60000; // ilk ping sonrası 60 s
+                if (!string.IsNullOrEmpty(_deviceToken)) SendPing();
+            };
+            _pingTimer.Start();
+        }
+
+        private readonly Timer _pingTimer;
+
+        private void UpdateStatusLabel()
+        {
+            if (string.IsNullOrEmpty(_deviceToken))
+                _statusLabel.Text = "Token gerekli — yapıştırıp Kaydet'e basın";
+            else
+                _statusLabel.Text = "Dinleniyor (" + (_isConnected ? "Bağlı" : "bağlantı kontrol ediliyor…") + ")";
+        }
+
+        private bool _isConnected;
+
+        private void OnSaveClicked()
+        {
+            var raw = _tokenBox.Text.Trim();
+            if (string.IsNullOrEmpty(raw))
+            {
+                AppendLog("Boş alan — token veya eşleşme kodu yapıştırın");
+                return;
+            }
+
+            // 4-10 haneli sayısal dizi → pair code; onu /caller-id/claim'e
+            // POST edip dönen gerçek token'ı sakla. Aksi halde doğrudan token
+            // kabul et.
+            if (IsLikelyPairCode(raw))
+            {
+                AppendLog("Eşleşme kodu algılandı (" + raw + ") — /caller-id/claim çağrılıyor...");
+                _saveTokenBtn.Enabled = false;
+                _saveTokenBtn.Text = "Eşleşiliyor...";
+                try
+                {
+                    var serial = SafeGetSerial();
+                    var resp = PostClaim(raw, serial);
+                    if (resp == null)
+                    {
+                        AppendLog("  ✗ Eşleşme başarısız — kod yanlış veya süresi dolmuş olabilir");
+                    }
+                    else
+                    {
+                        _deviceToken = resp.DeviceToken ?? string.Empty;
+                        _tokenBox.Text = _deviceToken;
+                        SaveConfig();
+                        AppendLog("  ✓ Eşleşme başarılı — firma: " + (resp.CompanyName ?? "?") +
+                                  ", deviceId: " + resp.DeviceId);
+                        SendPing(); // hemen heartbeat at ki web panel "Bağlı" olsun
+                    }
+                }
+                finally
+                {
+                    _saveTokenBtn.Enabled = true;
+                    _saveTokenBtn.Text = "Kaydet";
+                }
+            }
+            else
+            {
+                _deviceToken = raw;
+                SaveConfig();
+                AppendLog("Token kaydedildi (" + _deviceToken.Length + " karakter)");
+                SendPing();
+            }
+
+            UpdateStatusLabel();
+        }
+
+        private static bool IsLikelyPairCode(string s)
+        {
+            if (s.Length < 4 || s.Length > 10) return false;
+            for (int i = 0; i < s.Length; i++)
+                if (s[i] < '0' || s[i] > '9') return false;
+            return true;
+        }
+
+        private string SafeGetSerial()
+        {
+            try { return _cid?.Command("Serial") ?? string.Empty; }
+            catch { return string.Empty; }
+        }
+
+        private ClaimResponse PostClaim(string pairCode, string deviceSerial)
+        {
+            try
+            {
+                var url = _apiBase.TrimEnd('/') + "/caller-id/claim";
+                var req = (HttpWebRequest)WebRequest.Create(url);
+                req.Method = "POST";
+                req.ContentType = "application/json";
+                req.Timeout = 15000;
+
+                var body =
+                    "{\"pairCode\":\"" + JsonEscape(pairCode) + "\"," +
+                    "\"deviceSerial\":\"" + JsonEscape(deviceSerial) + "\"," +
+                    "\"deviceInfo\":\"" + JsonEscape(Environment.MachineName + " · win · bridge-com 1.0") + "\"}";
+                var bytes = Encoding.UTF8.GetBytes(body);
+                req.ContentLength = bytes.Length;
+                using (var s = req.GetRequestStream())
+                    s.Write(bytes, 0, bytes.Length);
+
+                using (var resp = (HttpWebResponse)req.GetResponse())
+                using (var sr = new StreamReader(resp.GetResponseStream() ?? throw new InvalidOperationException()))
+                {
+                    var json = sr.ReadToEnd();
+                    return ParseClaimResponse(json);
+                }
+            }
+            catch (WebException webEx)
+            {
+                var http = webEx.Response as HttpWebResponse;
+                AppendLog("    HTTP status: " + (http != null ? ((int)http.StatusCode).ToString() : "no-response"));
+                return null;
+            }
+            catch (Exception ex)
+            {
+                AppendLog("    claim exception: " + ex.Message);
+                return null;
+            }
+        }
+
+        // Minimal JSON extractor — üçüncü parti kütüphaneye dokunmamak için
+        // sadece ihtiyaç duyduğumuz dört alanı string match ile çekiyoruz.
+        private static ClaimResponse ParseClaimResponse(string json)
+        {
+            if (string.IsNullOrEmpty(json)) return null;
+            return new ClaimResponse
+            {
+                DeviceToken = JsonField(json, "deviceToken"),
+                CompanyName = JsonField(json, "companyName"),
+                CompanyId = JsonField(json, "companyId"),
+                DeviceId = int.TryParse(JsonField(json, "deviceId"), out var id) ? id : 0,
+            };
+        }
+
+        private static string JsonField(string json, string name)
+        {
+            // "name":"value" veya "name":123 ikisini de yakalar
+            var key = "\"" + name + "\"";
+            var idx = json.IndexOf(key, StringComparison.OrdinalIgnoreCase);
+            if (idx < 0) return string.Empty;
+            var colon = json.IndexOf(':', idx + key.Length);
+            if (colon < 0) return string.Empty;
+            var i = colon + 1;
+            while (i < json.Length && (json[i] == ' ' || json[i] == '\t')) i++;
+            if (i >= json.Length) return string.Empty;
+            if (json[i] == '"')
+            {
+                i++;
+                var end = i;
+                var sb = new StringBuilder();
+                while (end < json.Length && json[end] != '"')
+                {
+                    if (json[end] == '\\' && end + 1 < json.Length) { sb.Append(json[end + 1]); end += 2; }
+                    else { sb.Append(json[end]); end++; }
+                }
+                return sb.ToString();
+            }
+            var endNum = i;
+            while (endNum < json.Length && (char.IsDigit(json[endNum]) || json[endNum] == '.' || json[endNum] == '-'))
+                endNum++;
+            return json.Substring(i, endNum - i);
+        }
+
+        private void SendPing()
+        {
+            try
+            {
+                var url = _apiBase.TrimEnd('/') + "/caller-id/ping";
+                var req = (HttpWebRequest)WebRequest.Create(url);
+                req.Method = "POST";
+                req.ContentType = "application/json";
+                req.Headers["Authorization"] = "Bearer " + _deviceToken;
+                req.ContentLength = 0;
+                req.Timeout = 10000;
+                using (var resp = (HttpWebResponse)req.GetResponse())
+                {
+                    _isConnected = (int)resp.StatusCode >= 200 && (int)resp.StatusCode < 300;
+                }
+                UpdateStatusLabel();
+            }
+            catch (WebException webEx)
+            {
+                _isConnected = false;
+                var http = webEx.Response as HttpWebResponse;
+                AppendLog("Ping hatası: HTTP " + (http != null ? ((int)http.StatusCode).ToString() : "no-response"));
+                UpdateStatusLabel();
+            }
+            catch (Exception ex)
+            {
+                _isConnected = false;
+                AppendLog("Ping exception: " + ex.Message);
+                UpdateStatusLabel();
+            }
+        }
+
+        private class ClaimResponse
+        {
+            public int DeviceId;
+            public string DeviceToken;
+            public string CompanyName;
+            public string CompanyId;
         }
 
         private void RefreshDeviceStatus()
