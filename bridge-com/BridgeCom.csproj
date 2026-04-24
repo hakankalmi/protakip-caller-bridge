@@ -1,10 +1,12 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
-    <!-- NegroPos ve vendor "Cihaz Test" çalışıyor; aynı framework (4.0).
-         cid.dll + SetEvents yerine cidv5callerid ActiveX COM kullanıyoruz
-         — CID v6 cihaz için tek çalışan API. -->
-    <TargetFramework>net40</TargetFramework>
+    <!-- ActiveX COM tarafı için net40 yeterliydi, ama NetGSM TCP subscriber
+         modern async/await gerektirdiği için net48'e yükseldik. net40
+         derlenen AxInterop/Interop DLL'leri net48 host tarafından sorunsuz
+         yükleniyor (.NET Framework yukarı uyumlu). Win10+'da 4.8 default
+         kurulu, ek kurulum gerektirmiyor. -->
+    <TargetFramework>net48</TargetFramework>
     <UseWindowsForms>true</UseWindowsForms>
     <RootNamespace>ProTakipCallerBridgeCom</RootNamespace>
     <AssemblyName>ProTakipCallerBridgeCom</AssemblyName>

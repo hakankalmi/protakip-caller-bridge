@@ -45,6 +45,13 @@ namespace ProTakipCallerBridgeCom
         private string _apiBase = "https://api.protakip.com/api";
         private string _deviceToken = string.Empty;
 
+        // NetGSM TCP subscriber state. Pair sonrası /caller-id/pbx-config
+        // çekilir, enabled + provider=netgsm ise socket açılır. Her ping'te
+        // version alanı tekrar sorulur; değişmişse subscriber stop edilip
+        // yeni credentials ile yeniden başlatılır.
+        private NetgsmTcpClient _netgsm;
+        private string _netgsmVersion;
+
         private static readonly string ConfigDir = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
             "ProTakipCallerBridgeCom");
@@ -296,6 +303,8 @@ namespace ProTakipCallerBridgeCom
         {
             if (disposing)
             {
+                try { _netgsm?.Dispose(); } catch { }
+                _netgsm = null;
                 if (_tray != null)
                 {
                     _tray.Visible = false;
@@ -546,6 +555,12 @@ namespace ProTakipCallerBridgeCom
                 }
                 UpdateStatusLabel();
                 UpdateTrayIcon();
+
+                // Ping başarılı → PBX config'i de kontrol et. Eski .NET 8
+                // bridge'de bu akış vardı, bridge-com'a port edildi. NetGSM
+                // müşterileri ping'te subscriber'ın otomatik kurulduğunu
+                // görüyor; version değişimi anında yeniden bağlantı.
+                try { RefreshPbxConfig(); } catch (Exception ex) { AppendLog("PBX config refresh: " + ex.Message); }
             }
             catch (WebException webEx)
             {
@@ -570,6 +585,159 @@ namespace ProTakipCallerBridgeCom
             public string DeviceToken;
             public string CompanyName;
             public string CompanyId;
+        }
+
+        // ── NetGSM PBX config ────────────────────────────────────────────
+
+        private class PbxConfigResponse
+        {
+            public bool Enabled;
+            public string Provider;
+            public string Host;
+            public int Port;
+            public string Username;
+            public string Password;
+            public string Version;
+        }
+
+        /// <summary>
+        /// GET /caller-id/pbx-config — müşterinin NetGSM kredilerini çeker.
+        /// Version değişmişse mevcut subscriber'ı durdurup yeniden kuruyoruz
+        /// (web panelden Username/Password güncellemesi anında etki etsin).
+        /// Enabled=false veya provider ≠ netgsm → aktif subscriber varsa durdur.
+        /// Ağ hatasında sessiz — mevcut socket devam eder, sonraki ping'te
+        /// tekrar denenecek.
+        /// </summary>
+        private void RefreshPbxConfig()
+        {
+            if (string.IsNullOrEmpty(_deviceToken)) return;
+
+            var url = _apiBase.TrimEnd('/') + "/caller-id/pbx-config";
+            var req = (HttpWebRequest)WebRequest.Create(url);
+            req.Method = "GET";
+            req.Headers["Authorization"] = "Bearer " + _deviceToken;
+            req.Timeout = 10000;
+
+            PbxConfigResponse cfg = null;
+            try
+            {
+                using (var resp = (HttpWebResponse)req.GetResponse())
+                using (var sr = new StreamReader(resp.GetResponseStream() ?? throw new InvalidOperationException()))
+                {
+                    var json = sr.ReadToEnd();
+                    cfg = ParsePbxConfig(json);
+                }
+            }
+            catch
+            {
+                // 401/404/network — sessiz. Subscriber mevcut haliyle devam.
+                return;
+            }
+
+            if (cfg == null) return;
+
+            var wantsNetgsm = cfg.Enabled &&
+                              string.Equals(cfg.Provider, "netgsm", StringComparison.OrdinalIgnoreCase) &&
+                              !string.IsNullOrEmpty(cfg.Host) &&
+                              cfg.Port > 0 &&
+                              !string.IsNullOrEmpty(cfg.Username);
+
+            if (!wantsNetgsm)
+            {
+                // Pasif veya farklı sağlayıcı → mevcut varsa kapat.
+                if (_netgsm != null)
+                {
+                    AppendLog("NetGSM devre dışı, TCP kapatılıyor");
+                    try { _netgsm.Dispose(); } catch { }
+                    _netgsm = null;
+                    _netgsmVersion = null;
+                }
+                return;
+            }
+
+            // Aynı version + aynı subscriber zaten çalışıyor → dokunma.
+            if (_netgsm != null && _netgsmVersion == cfg.Version) return;
+
+            // Değişmiş veya yeni → eski subscriber'ı kapat, yenisini kur.
+            if (_netgsm != null)
+            {
+                AppendLog(string.Format("NetGSM config değişti (version {0} → {1}), TCP yeniden kuruluyor",
+                    _netgsmVersion ?? "-", cfg.Version ?? "-"));
+                try { _netgsm.Dispose(); } catch { }
+                _netgsm = null;
+            }
+
+            AppendLog(string.Format("NetGSM TCP başlatılıyor: {0}:{1}", cfg.Host, cfg.Port));
+            var subscriber = new NetgsmTcpClient(
+                host: cfg.Host,
+                port: cfg.Port,
+                username: cfg.Username,
+                password: cfg.Password ?? string.Empty,
+                version: cfg.Version ?? string.Empty,
+                onIncomingNumber: OnNetgsmIncomingAsync,
+                log: msg => AppendLog(msg));
+            subscriber.Start();
+            _netgsm = subscriber;
+            _netgsmVersion = cfg.Version;
+        }
+
+        private System.Threading.Tasks.Task OnNetgsmIncomingAsync(string phoneNumber)
+        {
+            // NetGSM event'lerini aynı USB OnCallerID yoluyla işle: normalize
+            // + /caller-id/ingest POST. UI thread'e marshal gerek yok, ingest
+            // zaten HttpWebRequest ile senkron çalışıyor.
+            try
+            {
+                var phone = (phoneNumber ?? string.Empty).Trim();
+                if (phone.Length >= 2 && phone.StartsWith("09")) phone = phone.Substring(2);
+                if (phone.Length == 12) phone = phone.Substring(1, 11);
+
+                AppendLog(string.Format("[NetGSM ring] phone='{0}'", phone));
+                if (string.IsNullOrEmpty(phone)) return System.Threading.Tasks.Task.FromResult(0);
+
+                if (string.IsNullOrEmpty(_deviceToken))
+                {
+                    AppendLog("  → token yok, ingest atlanıyor");
+                    return System.Threading.Tasks.Task.FromResult(0);
+                }
+
+                var ok = PostIngest(phone);
+                AppendLog(ok ? "  ✓ /caller-id/ingest (netgsm) başarılı"
+                             : "  ✗ /caller-id/ingest (netgsm) başarısız");
+            }
+            catch (Exception ex)
+            {
+                AppendLog("NetGSM ingest exception: " + ex.Message);
+            }
+            return System.Threading.Tasks.Task.FromResult(0);
+        }
+
+        private static PbxConfigResponse ParsePbxConfig(string json)
+        {
+            if (string.IsNullOrEmpty(json)) return null;
+            var r = new PbxConfigResponse();
+            r.Enabled = ParseBoolField(json, "enabled");
+            r.Provider = JsonField(json, "provider");
+            r.Host = JsonField(json, "host");
+            var portStr = JsonField(json, "port");
+            int port;
+            r.Port = int.TryParse(portStr, out port) ? port : 0;
+            r.Username = JsonField(json, "username");
+            r.Password = JsonField(json, "password");
+            r.Version = JsonField(json, "version");
+            return r;
+        }
+
+        private static bool ParseBoolField(string json, string name)
+        {
+            // "enabled":true / "enabled":false — basit string arama
+            var key = "\"" + name + "\"";
+            var idx = json.IndexOf(key, StringComparison.OrdinalIgnoreCase);
+            if (idx < 0) return false;
+            var colon = json.IndexOf(':', idx + key.Length);
+            if (colon < 0) return false;
+            var rest = json.Substring(colon + 1).TrimStart();
+            return rest.StartsWith("true", StringComparison.OrdinalIgnoreCase);
         }
 
         private void RefreshDeviceStatus()
