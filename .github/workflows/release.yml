@@ -47,11 +47,24 @@ jobs:
           Compress-Archive -Path publish\* -DestinationPath ProTakipCallerBridge.zip -Force
           Get-Item ProTakipCallerBridge.zip | Format-List Length
 
-      - name: Upload build artifact
+      - name: Build vendor-test (.NET Framework 4.8, vendor Form1.cs birebir)
+        shell: pwsh
+        run: |
+          # Isolated diagnostic build: vendor sample kodu olduğu gibi,
+          # .NET Framework 4.8 target. Eğer bu exe de aramaları
+          # yakalamazsa DLL cihazın CallerID event'ini vermiyor demektir
+          # (bizim .NET 8 kodumuzda değil, SDK'nın kendisinde sorun var).
+          dotnet build vendor-test/VendorTest.csproj -c Release -o vendor-test-publish
+          Compress-Archive -Path vendor-test-publish\VendorTest.exe,vendor-test-publish\cidshow_x64,vendor-test-publish\cidshow_x86 -DestinationPath VendorTest.zip -Force
+          Get-Item VendorTest.zip | Format-List Length
+
+      - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
           name: bridge-zip
-          path: ProTakipCallerBridge.zip
+          path: |
+            ProTakipCallerBridge.zip
+            VendorTest.zip
           retention-days: 30
 
   deploy:
@@ -64,7 +77,7 @@ jobs:
           name: bridge-zip
           path: .
 
-      - name: SCP zip to Hetzner
+      - name: SCP zips to Hetzner
         uses: appleboy/scp-action@v0.1.7
         timeout-minutes: 3
         with:
@@ -72,7 +85,7 @@ jobs:
           username: root
           key: ${{ secrets.HETZNER_SSH_KEY }}
           port: 22
-          source: ProTakipCallerBridge.zip
+          source: "ProTakipCallerBridge.zip,VendorTest.zip"
           target: /var/www/html/downloads/
           timeout: 30s
           command_timeout: 60s
