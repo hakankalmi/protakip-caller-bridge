@@ -1,8 +1,10 @@
 using System;
 using System.ComponentModel;
 using System.Drawing;
+using System.Drawing.Drawing2D;
 using System.IO;
 using System.Net;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Windows.Forms;
 
@@ -205,21 +207,16 @@ namespace ProTakipCallerBridgeCom
             };
         }
 
+        // Tray icon renk durumları — bridge genel sağlığına göre değişir.
+        private enum TrayState { Pending, Ok, Error }
+
         private void InitTray()
         {
-            var iconStream = typeof(MainForm).Assembly.GetManifestResourceStream(
-                "ProTakipCallerBridgeCom.app.ico");
-            Icon trayIcon;
-            try
-            {
-                trayIcon = iconStream != null
-                    ? new Icon(iconStream)
-                    : SystemIcons.Application;
-            }
-            catch
-            {
-                trayIcon = SystemIcons.Application;
-            }
+            // Tray ikonunu runtime'da çiz: yeşil/amber/kırmızı daire üstünde
+            // beyaz telefon glyph. Küçük bir asset dosyası paketlemekten
+            // kaçınıyoruz, Windows 16/20/24 px'e downscale ediyor.
+            var trayIcon = BuildTrayIcon(TrayState.Pending);
+            Icon = trayIcon;  // form title bar + taskbar ikonu da aynı olsun
 
             var menu = new ContextMenuStrip();
             var openItem = new ToolStripMenuItem("Pencereyi Aç");
@@ -279,6 +276,60 @@ namespace ProTakipCallerBridgeCom
             }
             base.Dispose(disposing);
         }
+
+        private void UpdateTrayIcon()
+        {
+            if (_tray == null) return;
+            TrayState s;
+            if (string.IsNullOrEmpty(_deviceToken)) s = TrayState.Pending;
+            else if (_isConnected) s = TrayState.Ok;
+            else s = TrayState.Error;
+
+            var old = _tray.Icon;
+            _tray.Icon = BuildTrayIcon(s);
+            try { old?.Dispose(); } catch { }
+        }
+
+        /// <summary>
+        /// Tray ikonunu runtime'da çizer. 32x32 kaynak bitmap — Windows 16/20
+        /// /24 piksele downscale eder. Renkli daire + beyaz telefon glyph,
+        /// küçük boyutta bile okunaklı.
+        /// </summary>
+        private static Icon BuildTrayIcon(TrayState state)
+        {
+            Color fill;
+            switch (state)
+            {
+                case TrayState.Ok:      fill = Color.FromArgb(22, 163, 74);  break; // green-600
+                case TrayState.Error:   fill = Color.FromArgb(220, 38, 38);  break; // red-600
+                default:                fill = Color.FromArgb(217, 119, 6);  break; // amber-600
+            }
+
+            using (var bmp = new Bitmap(32, 32))
+            {
+                using (var g = Graphics.FromImage(bmp))
+                {
+                    g.SmoothingMode = SmoothingMode.AntiAlias;
+                    g.Clear(Color.Transparent);
+                    using (var brush = new SolidBrush(fill))
+                        g.FillEllipse(brush, 2, 2, 28, 28);
+
+                    using (var pen = new Pen(Color.White, 2.4f))
+                    {
+                        pen.StartCap = LineCap.Round;
+                        pen.EndCap = LineCap.Round;
+                        // Stilize edilmiş ☏ — 135°'den 270° yay.
+                        g.DrawArc(pen, 9, 9, 14, 14, 135, 270);
+                    }
+                }
+                IntPtr hIcon = bmp.GetHicon();
+                try { return (Icon)Icon.FromHandle(hIcon).Clone(); }
+                finally { DestroyIcon(hIcon); }
+            }
+        }
+
+        [DllImport("user32.dll", CharSet = CharSet.Auto, ExactSpelling = true)]
+        private static extern bool DestroyIcon(IntPtr handle);
 
         private readonly Timer _pingTimer;
 
@@ -342,6 +393,7 @@ namespace ProTakipCallerBridgeCom
             }
 
             UpdateStatusLabel();
+            UpdateTrayIcon();
         }
 
         private static bool IsLikelyPairCode(string s)
@@ -456,6 +508,7 @@ namespace ProTakipCallerBridgeCom
                     _isConnected = (int)resp.StatusCode >= 200 && (int)resp.StatusCode < 300;
                 }
                 UpdateStatusLabel();
+                UpdateTrayIcon();
             }
             catch (WebException webEx)
             {
@@ -463,12 +516,14 @@ namespace ProTakipCallerBridgeCom
                 var http = webEx.Response as HttpWebResponse;
                 AppendLog("Ping hatası: HTTP " + (http != null ? ((int)http.StatusCode).ToString() : "no-response"));
                 UpdateStatusLabel();
+                UpdateTrayIcon();
             }
             catch (Exception ex)
             {
                 _isConnected = false;
                 AppendLog("Ping exception: " + ex.Message);
                 UpdateStatusLabel();
+                UpdateTrayIcon();
             }
         }
 
