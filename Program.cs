@@ -113,6 +113,12 @@ internal static class Program
         try
         {
             ApplicationConfiguration.Initialize();
+
+            // Vendor Form1.cs line 118 — DLL callback'leri UI thread
+            // dışından gelince WinForms cross-thread exception fırlatıyor
+            // ve CallerID event'i drop olabiliyor. Disable ederek vendor
+            // davranışıyla birebir yap.
+            System.Windows.Forms.Control.CheckForIllegalCrossThreadCalls = false;
             Log("App config initialized");
 
             _cfg = BridgeConfig.Load();
@@ -488,6 +494,13 @@ internal static class Program
     private static void OnCallerId(string deviceSerial, string line, string phoneNumber,
         string dateTime, string other)
     {
+        // SYNC log on the native callback thread — proves the DLL fired
+        // the callback at all, independent of UI marshalling. If this
+        // line never appears in bridge.log after a real call, the DLL
+        // is not invoking the callback for this device/driver combo,
+        // no amount of C# code changes will help.
+        Log($"[native OnCallerId fired] phone='{phoneNumber}' line='{line}' serial='{deviceSerial}' dt='{dateTime}' other='{other}'");
+
         _ui.Post(async _ =>
         {
             _lastDeviceSerial ??= deviceSerial;
