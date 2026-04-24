@@ -210,12 +210,38 @@ namespace ProTakipCallerBridgeCom
         // Tray icon renk durumları — bridge genel sağlığına göre değişir.
         private enum TrayState { Pending, Ok, Error }
 
+        // 3 durum için icon'ları cache'le. Her state değişiminde yeniden
+        // Bitmap+GetHicon yapmak GDI handle leak'i yapıyordu ve eski icon'u
+        // Dispose etmek form title bar'ının da aynı icon'a referans etmesi
+        // yüzünden ObjectDisposedException fırlatıyordu ("Bırakılmış nesne:
+        // Icon"). Bu cache ile her icon ömür boyu yaşar, Dispose()'da toplu
+        // temizlenir.
+        private Icon _iconPending;
+        private Icon _iconOk;
+        private Icon _iconError;
+
+        private Icon GetCachedTrayIcon(TrayState s)
+        {
+            switch (s)
+            {
+                case TrayState.Ok:
+                    if (_iconOk == null) _iconOk = BuildTrayIcon(TrayState.Ok);
+                    return _iconOk;
+                case TrayState.Error:
+                    if (_iconError == null) _iconError = BuildTrayIcon(TrayState.Error);
+                    return _iconError;
+                default:
+                    if (_iconPending == null) _iconPending = BuildTrayIcon(TrayState.Pending);
+                    return _iconPending;
+            }
+        }
+
         private void InitTray()
         {
             // Tray ikonunu runtime'da çiz: yeşil/amber/kırmızı daire üstünde
             // beyaz telefon glyph. Küçük bir asset dosyası paketlemekten
             // kaçınıyoruz, Windows 16/20/24 px'e downscale ediyor.
-            var trayIcon = BuildTrayIcon(TrayState.Pending);
+            var trayIcon = GetCachedTrayIcon(TrayState.Pending);
             Icon = trayIcon;  // form title bar + taskbar ikonu da aynı olsun
 
             var menu = new ContextMenuStrip();
@@ -268,11 +294,21 @@ namespace ProTakipCallerBridgeCom
 
         protected override void Dispose(bool disposing)
         {
-            if (disposing && _tray != null)
+            if (disposing)
             {
-                _tray.Visible = false;
-                _tray.Dispose();
-                _tray = null;
+                if (_tray != null)
+                {
+                    _tray.Visible = false;
+                    _tray.Dispose();
+                    _tray = null;
+                }
+                // Icon cache temizliği. base.Dispose() form.Icon'u kendisi
+                // release ediyor; biz sadece tray + geri kalan state'leri
+                // dispose ediyoruz. Hepsi GDI handle — leak olmasın.
+                try { _iconPending?.Dispose(); } catch { }
+                try { _iconOk?.Dispose(); } catch { }
+                try { _iconError?.Dispose(); } catch { }
+                _iconPending = _iconOk = _iconError = null;
             }
             base.Dispose(disposing);
         }
@@ -285,9 +321,10 @@ namespace ProTakipCallerBridgeCom
             else if (_isConnected) s = TrayState.Ok;
             else s = TrayState.Error;
 
-            var old = _tray.Icon;
-            _tray.Icon = BuildTrayIcon(s);
-            try { old?.Dispose(); } catch { }
+            // Cache'den al, eski icon'u DISPOSE ETME — form title bar aynı
+            // referansı tutuyor, dispose edilirse hide/paint sırasında
+            // ObjectDisposedException fırlatıyor.
+            _tray.Icon = GetCachedTrayIcon(s);
         }
 
         /// <summary>
