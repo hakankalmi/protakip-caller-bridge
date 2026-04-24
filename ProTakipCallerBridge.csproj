@@ -35,14 +35,14 @@
          SignalR on this side — the hub only serves browser clients. -->
   </ItemGroup>
 
-  <!-- vendor-test/ klasörü bağımsız bir .NET Framework 4.8 tanı projesi;
-       bu SDK-style csproj otomatik glob'la onun Program.cs'ini de compile
-       etmeye çalışırsa "more than one entry point" hatası veriyor.
-       Tamamen dışla. -->
+  <!-- Paralel .NET Framework alt projeleri (vendor-test/ ve bridge-com/)
+       kendi csproj'larıyla derleniyor. SDK-style implicit glob onların
+       kaynaklarını bu projeye katarsa "more than one entry point" veya
+       ActiveX COM referans hataları verir. Komple dışla. -->
   <ItemGroup>
-    <Compile Remove="vendor-test\**" />
-    <EmbeddedResource Remove="vendor-test\**" />
-    <None Remove="vendor-test\**" />
+    <Compile Remove="vendor-test\**;bridge-com\**" />
+    <EmbeddedResource Remove="vendor-test\**;bridge-com\**" />
+    <None Remove="vendor-test\**;bridge-com\**" />
   </ItemGroup>
 
   <!-- Native caller-id DLLs shipped alongside the exe. `ExcludeFromSingleFile=true`
