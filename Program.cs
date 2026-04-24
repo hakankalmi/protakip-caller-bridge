@@ -539,6 +539,8 @@ internal static class Program
     }
 
     private static bool _firstSignalLogged;
+    private static string? _loggedSerial;
+    private static string? _loggedModel;
 
     private static void OnSignal(string deviceModel, string deviceSerial,
         int signal1, int signal2, int signal3, int signal4)
@@ -547,12 +549,25 @@ internal static class Program
         if (!string.IsNullOrWhiteSpace(deviceSerial))
             _lastDeviceSerial = deviceSerial;
 
-        // Ilk sinyali loga yaz — DLL callback'inin ATEŞLENDIGINI KANITLAMAK
-        // debugging icin kritik. Daha sonra tek tek loglamiyoruz, spam olur.
+        // İlk sinyali loga yaz — DLL callback'inin ateşlendiğini kanıtlar.
         if (!_firstSignalLogged)
         {
             _firstSignalLogged = true;
-            Log($"First DLL Signal received — model={deviceModel} serial={deviceSerial} s1={signal1} s2={signal2} s3={signal3} s4={signal4}");
+            Log($"First DLL Signal received — model='{deviceModel}' serial='{deviceSerial}' s1={signal1} s2={signal2} s3={signal3} s4={signal4}");
+        }
+
+        // Model veya seri değişirse log — tipik olarak ilk Signal boş
+        // model/serial geliyor, cihaz USB üstünden enumerate edildikten
+        // sonra dolu geliyor. Bu anı log'da görmek bağlantı aşamasını
+        // takip etmek için kritik.
+        if (deviceModel != _loggedModel || deviceSerial != _loggedSerial)
+        {
+            _loggedModel = deviceModel;
+            _loggedSerial = deviceSerial;
+            var hasDevice = !string.IsNullOrWhiteSpace(deviceSerial) || !string.IsNullOrWhiteSpace(deviceModel);
+            Log(hasDevice
+                ? $"Device identity changed — model='{deviceModel}' serial='{deviceSerial}' (hat sinyalleri: {signal1}/{signal2}/{signal3}/{signal4})"
+                : "Device identity cleared — no model or serial from DLL");
         }
 
         // USB sinyali geldiğinde status penceresine yansıt. Sinyal her 5-10
