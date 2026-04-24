@@ -20,12 +20,27 @@ jobs:
       - name: Publish (win-x64, single-file self-contained)
         run: dotnet publish ProTakipCallerBridge.csproj -c Release -o publish
 
-      - name: Upload exe to Hetzner (api.protakip.com/downloads/)
-        # Battle-tested action — PowerShell'in kendi SSH key/encoding
-        # wrapping'inde UTF-16 BOM, icacls parse bug'ı, multi-line PEM
-        # handling gibi 5 ayrı sorunu birden çözüyor. İçeride native
-        # openssh-client + ssh-keygen çalıştırdığı için key format
-        # ("invalid format") da sorun olmuyor.
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bridge-exe
+          path: publish/ProTakipCallerBridge.exe
+          retention-days: 7
+
+  deploy:
+    # appleboy/scp-action bir Docker container action — sadece Linux
+    # runner'da koşar. Windows build job'ından artifact alıp Linux'a
+    # geçiyoruz, native openssh-client ile SCP yapıyor.
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Download build artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: bridge-exe
+          path: publish
+
+      - name: SCP exe to Hetzner
         uses: appleboy/scp-action@v0.1.7
         timeout-minutes: 3
         with:
@@ -38,9 +53,3 @@ jobs:
           strip_components: 1
           timeout: 30s
           command_timeout: 60s
-
-      - name: Artifact (always)
-        uses: actions/upload-artifact@v4
-        with:
-          name: ProTakipCallerBridge
-          path: publish/ProTakipCallerBridge.exe
