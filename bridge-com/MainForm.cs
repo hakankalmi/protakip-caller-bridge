@@ -89,6 +89,14 @@ namespace ProTakipCallerBridgeCom
 
                 _cid.OnCallerID += Cid_OnCallerID;
                 Program.LogLine("ActiveX OnCallerID event handler subscribed");
+
+                // NegroPos pattern (anaForm.cs:607-608) — Hide+Start yapmadan
+                // ActiveX cihazla iletişime geçmiyor, Command() boş dönüyor,
+                // OnCallerID event'i asla fire etmiyor. Start() kritik.
+                _cid.Hide();
+                Program.LogLine("ActiveX Hide() OK");
+                _cid.Start();
+                Program.LogLine("ActiveX Start() OK — cihaz dinleme başladı");
             }
             catch (Exception ex)
             {
