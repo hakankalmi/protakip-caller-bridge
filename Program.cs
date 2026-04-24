@@ -158,39 +158,52 @@ internal static class Program
             _statusForm.UpdateUsb(connected: false, deviceSerial: null, lastSignalAt: null);
             _statusForm.UpdateNetgsm(NetgsmState.Disabled);
 
-            // Force-create the window handle so a message-pumping HWND
-            // exists before we hook cid.dll. CIDSHOW's native callbacks
-            // require a message-loop window on the calling thread; if
-            // we hook with no window the DLL never fires events (OnSignal
-            // also stays silent). The sample Form1.cs hooks inside
-            // Form_Load after the handle exists — same trick here.
-            _ = _statusForm.Handle;
-            Log("Status form HWND allocated — DLL callbacks will have a message pump");
+            // Hook cid.dll INSIDE the StatusForm's Load event — vendor
+            // sample Form1 does the same. CIDSHOW records the calling
+            // thread's window message queue during SetEvents; if we hook
+            // before Application.Run starts the pump, the DLL can't post
+            // CallerID events (Signal works because it runs on its own
+            // polling thread). StatusForm.Load fires AFTER the pump is
+            // up and the window is alive — exactly the timing the DLL
+            // expects.
+            _statusForm.Load += (_, _) =>
+            {
+                try
+                {
+                    CidInterop.SetEvents(OnCallerId, OnSignal);
+                    Log("cid.dll SetEvents hooked (inside Load event, message pump alive)");
+                }
+                catch (Exception ex)
+                {
+                    Log("cid.dll load FAILED: " + ex);
+                    MessageBox.Show(
+                        "cid.dll yüklenemedi: " + ex.Message +
+                        "\n\nBridge tray'de kalacak ama telefon çağrılarını algılayamaz. " +
+                        "Visual C++ 2010/2015 runtime kurulu olduğundan emin olun.",
+                        "ProTakip Caller Id",
+                        MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                }
+            };
 
-            // If we aren't paired yet, block on the pair dialog before hooking
-            // the DLL — no point listening for calls we can't forward.
+            // StatusForm ilk startup'ta HIDDEN açılsın ama Load event'i
+            // fire etsin: Show() sonra Hide(). Kullanıcı tray'den double-
+            // click ile tekrar açacak. Message loop StatusForm ile başlar.
+            _statusForm.WindowState = FormWindowState.Normal;
+            _statusForm.ShowInTaskbar = false;
+            _statusForm.Shown += (_, _) =>
+            {
+                // Show event Load sonrası gelir; hemen gizle.
+                _statusForm?.Hide();
+                _statusForm!.ShowInTaskbar = true; // subsequent show'larda taskbar'da olsun
+            };
+
+            // If we aren't paired yet, block on the pair dialog before
+            // starting the message loop. Pair finishes → Application.Run
+            // launches StatusForm → Load fires → SetEvents hooks DLL.
             if (!_cfg.IsPaired)
             {
                 Log("Not paired — showing PairDialog");
                 ShowPairDialog();
-            }
-
-            // Hook the DLL regardless of pair state; if the user cancels the
-            // dialog we still want the tray icon alive so they can retry.
-            try
-            {
-                CidInterop.SetEvents(OnCallerId, OnSignal);
-                Log("cid.dll SetEvents hooked");
-            }
-            catch (Exception ex)
-            {
-                Log("cid.dll load FAILED: " + ex);
-                MessageBox.Show(
-                    "cid.dll yüklenemedi: " + ex.Message +
-                    "\n\nBridge tray'de kalacak ama telefon çağrılarını algılayamaz. " +
-                    "Visual C++ 2010/2015 runtime kurulu olduğundan emin olun.",
-                    "ProTakip Caller Id",
-                    MessageBoxButtons.OK, MessageBoxIcon.Warning);
             }
 
             // Heartbeat — every 60s push /caller-id/ping so the web header
@@ -229,7 +242,12 @@ internal static class Program
             Log("Heartbeat timer armed (5s initial, 60s interval)");
 
             Log("Entering message loop");
-            Application.Run();
+            // StatusForm'u parametre olarak veriyoruz — vendor sample
+            // Application.Run(new Form1()) ile birebir. Bu pattern Form
+            // Load event'inin fire etmesini garanti ediyor, SetEvents
+            // Load içinde çalışıyor. Parametresiz Application.Run() Form
+            // Load'unu hiç tetiklemezdi.
+            Application.Run(_statusForm);
             _heartbeatTimer.Dispose();
             _netgsm?.Dispose();
             _statusForm?.Dispose();
