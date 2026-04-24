@@ -112,11 +112,12 @@ public sealed class NetgsmTcpClient : IDisposable
 
         using var stream = client.GetStream();
 
-        // Login packet — same shape NegroPos used. crm_id is a random token
-        // that appears in every downstream event; NetGSM uses it to dedupe
-        // parallel subscriptions. We don't care about the value, just need
-        // one per session.
-        var crmId = Guid.NewGuid().ToString("N").Substring(0, 16);
+        // Login packet — NegroPos paritesi. crm_id INTEGER string olmalı
+        // (rnd.Next().ToString()). Guid/hex verince NetGSM login'i sessizce
+        // reject ediyor; cevap/hata frame'i dahi atmıyor, socket açık kalıp
+        // event akmıyor. Random.Next int32 üretir, NetGSM bunu dedup için
+        // session tag olarak saklıyor.
+        var crmId = new Random().Next(100_000, int.MaxValue).ToString();
         var loginPayload = JsonSerializer.Serialize(new
         {
             command = "login",
@@ -150,25 +151,36 @@ public sealed class NetgsmTcpClient : IDisposable
                 return;
             }
 
-            accumulator.Append(Encoding.UTF8.GetString(buffer, 0, read));
+            // NegroPos paritesi: NetGSM bazı mesajları düz string olarak
+            // ('login Successful', 'Yanlis kullanici adi veya sifre')
+            // bazılarını JSON olarak \n\n ile / bazılarını sadece \n ile
+            // gönderiyor. Her incoming chunk'ı tek bir mesaj olarak işlemek
+            // + trailing newline'ları strip etmek en güvenilir yaklaşım.
+            // Accumulator'ı tamamen bırakıyoruz, her read bir "mesaj".
+            var chunk = Encoding.UTF8.GetString(buffer, 0, read);
+            accumulator.Append(chunk);
 
-            // Events are separated by "\n\n". Extract complete frames,
-            // leave any partial tail for the next read.
+            // Mesaj(lar)ı \n karakterleriyle böl ve her parçayı ayrı handle et.
+            // Birden çok frame aynı chunk içinde gelirse hepsi parse edilir.
+            // Partial JSON (açılmış { ama kapanmamış) uçları bir sonraki
+            // read'e bırakılır.
             while (true)
             {
                 var payload = accumulator.ToString();
-                var idx = payload.IndexOf("\n\n", StringComparison.Ordinal);
-                if (idx < 0) break;
+                if (payload.Length == 0) break;
 
-                var frame = payload.Substring(0, idx).Trim();
-                accumulator.Remove(0, idx + 2);
+                int end = FindFrameEnd(payload);
+                if (end < 0)
+                {
+                    // Kapanmamış JSON — sonraki chunk ile birleşmesini bekle
+                    break;
+                }
+
+                var frame = payload.Substring(0, end).Trim('\n', '\r', ' ', '\t');
+                accumulator.Remove(0, end);
 
                 if (frame.Length == 0) continue;
 
-                // Temporary verbose logging — NetGSM'in Cantay gibi yeni
-                // firmalar için hangi scenario/context adlarını kullandığını
-                // doğrulamak için frame'i ham halde log'a yazıyoruz. Arama
-                // yakalama doğrulandıktan sonra bu satırı kaldırabiliriz.
                 var preview = frame.Length > 500 ? frame.Substring(0, 500) + "…" : frame;
                 Log($"Netgsm frame: {preview}");
 
@@ -177,11 +189,76 @@ public sealed class NetgsmTcpClient : IDisposable
         }
     }
 
+    /// <summary>
+    /// Accumulator'daki ilk tam frame'in bitiş index'ini döner (exclusive).
+    /// Üç format destekli:
+    ///   1. JSON ({...}) — brace balance ile bitiş yakalanır, nested OK.
+    ///   2. \n\n separator ile biten blok.
+    ///   3. Tek \n ile biten düz text ("login Successful", "Yanlis ...").
+    /// Hiçbiri yoksa -1; caller sonraki read'i bekler.
+    /// </summary>
+    private static int FindFrameEnd(string buf)
+    {
+        int i = 0;
+        while (i < buf.Length && (buf[i] == '\n' || buf[i] == '\r' || buf[i] == ' ' || buf[i] == '\t')) i++;
+        if (i >= buf.Length) return buf.Length; // sadece whitespace
+
+        if (buf[i] == '{')
+        {
+            int depth = 0;
+            bool inStr = false;
+            for (int j = i; j < buf.Length; j++)
+            {
+                char c = buf[j];
+                if (inStr)
+                {
+                    if (c == '\\') { j++; continue; }
+                    if (c == '"') inStr = false;
+                }
+                else
+                {
+                    if (c == '"') inStr = true;
+                    else if (c == '{') depth++;
+                    else if (c == '}')
+                    {
+                        depth--;
+                        if (depth == 0) return j + 1;
+                    }
+                }
+            }
+            return -1; // JSON kapanmadı
+        }
+
+        // Plain-text satır — ilk \n'de kes
+        int nl = buf.IndexOf('\n', i);
+        if (nl < 0) return -1;
+        return nl + 1;
+    }
+
     private async Task HandleFrameAsync(string json)
     {
         string? scenario = null;
         string? contextName = null;
         string? customerNum = null;
+
+        // Plain-text NetGSM response'ları — JSON değil, direkt log'la.
+        if (json.IndexOf("login Successful", StringComparison.OrdinalIgnoreCase) >= 0)
+        {
+            Log("Netgsm login OK");
+            return;
+        }
+        if (json.IndexOf("Yanlis kullanici", StringComparison.OrdinalIgnoreCase) >= 0 ||
+            json.IndexOf("wrong username", StringComparison.OrdinalIgnoreCase) >= 0)
+        {
+            Log($"Netgsm login REJECTED: {json}");
+            return;
+        }
+        // JSON değilse ve tanıdık bir plain-text de değilse — log at, parse atla.
+        if (json.Length == 0 || json[0] != '{')
+        {
+            Log($"Netgsm unrecognized frame (non-JSON): {json}");
+            return;
+        }
 
         try
         {
