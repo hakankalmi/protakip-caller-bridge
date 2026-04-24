@@ -31,7 +31,11 @@ jobs:
           # bozuluyor. System.IO.File.WriteAllText + ASCII encoding ile
           # saf ASCII dosya yaz.
           [System.IO.File]::WriteAllText($keyPath, $env:HETZNER_SSH_KEY, [System.Text.Encoding]::ASCII)
-          icacls $keyPath /inheritance:r /grant:r "$env:USERNAME:(R)" | Out-Null
+          # PowerShell 7 (pwsh) "$env:USERNAME:(R)" içindeki `(R)` tokenini
+          # sub-expression olarak parse edip "Invalid parameter" atıyor.
+          # Permission stringini önceden tek değişkende birleştir.
+          $perm = "${env:USERNAME}:(R)"
+          icacls $keyPath /inheritance:r /grant:r $perm | Out-Null
 
           # Timeout + batch mode: şifre prompt'u çıkarsa anında fail.
           # Tek denemede bağlanamazsa 15sn içinde hata ver, step timeout'u
