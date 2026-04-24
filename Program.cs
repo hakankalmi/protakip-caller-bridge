@@ -165,28 +165,36 @@ internal static class Program
             _statusForm.UpdateUsb(connected: false, deviceSerial: null, lastSignalAt: null);
             _statusForm.UpdateNetgsm(NetgsmState.Disabled);
 
-            // Hook cid.dll INSIDE the StatusForm's Load event — vendor
-            // sample Form1 does the same. Delegate instances are created
-            // EXPLICITLY with `new` (vendor pattern) and kept in static
-            // fields inside CidInterop to stop the GC from freeing them
-            // under the DLL's feet. Implicit method-group conversion
-            // sometimes confuses the marshaller about delegate identity.
-            _statusForm.Load += (_, _) =>
+            // Hook cid.dll INSIDE StatusForm's ACTIVATED event — vendor
+            // Delphi source (Unit1.pas):
+            //   procedure TForm1.FormActivate(Sender: TObject);
+            //   begin
+            //     SetEvents(CallerID, Signal);
+            //   end;
+            // Activated event Load'dan sonra fire eder, form VISIBLE +
+            // foreground + odaklanmış durumda. DLL callback'i register
+            // eden thread'i kaydettiği an window aktif olmalı. Load'da
+            // form henüz visible değil → DLL CallerID event post'u
+            // düşüyor olabilir. Activated'a taşıyoruz + ilk fire'da
+            // tekrar hook etmeyecek şekilde tek seferlik.
+            bool hooked = false;
+            _statusForm.Activated += (_, _) =>
             {
+                if (hooked) return;
+                hooked = true;
                 try
                 {
                     var callerIdDelegate = new CidInterop.CallerIdCallback(OnCallerId);
                     var signalDelegate = new CidInterop.SignalCallback(OnSignal);
                     CidInterop.SetEvents(callerIdDelegate, signalDelegate);
-                    Log("cid.dll SetEvents hooked (inside Load event — vendor pattern)");
+                    Log("cid.dll SetEvents hooked (inside Activated event — Delphi vendor pattern)");
                 }
                 catch (Exception ex)
                 {
                     Log("cid.dll load FAILED: " + ex);
                     MessageBox.Show(
                         "cid.dll yüklenemedi: " + ex.Message +
-                        "\n\nBridge tray'de kalacak ama telefon çağrılarını algılayamaz. " +
-                        "Visual C++ 2010/2015 runtime kurulu olduğundan emin olun.",
+                        "\n\nBridge tray'de kalacak ama telefon çağrılarını algılayamaz.",
                         "ProTakip Caller Id",
                         MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 }
