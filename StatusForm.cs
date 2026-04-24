@@ -117,7 +117,7 @@ public class StatusForm : Form
 
         _subtitleLabel = new Label
         {
-            Text = "Sekreter PC köprüsü — app.protakip.com ile bağlı",
+            Text = $"Sekreter PC köprüsü — v{Program.AppVersion}",
             Font = new Font("Segoe UI", 10f),
             ForeColor = TextMuted,
             AutoSize = true,

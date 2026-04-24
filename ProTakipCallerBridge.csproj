@@ -14,16 +14,18 @@
     <Product>ProTakip Caller Id</Product>
     <Company>ProTakip</Company>
     <Copyright>© 2026 ProTakip</Copyright>
-    <!-- Single-file self-contained publish → one ProTakipCallerBridge.exe
-         (~70 MB compressed). .NET runtime + native cidshow DLLs are
-         extracted at first run to an app-local temp folder; the exe has
-         zero on-disk dependencies. DllImport resolution is handled at
-         runtime via NativeLibrary.SetDllImportResolver in CidInterop. -->
+    <!-- Single-file self-contained publish. Native cidshow DLLs live
+         SIDE-BY-SIDE with the exe (not self-extracted) because cid.dll
+         loads secondary modules via Windows' default DLL search path —
+         those lookups don't scan the self-extract temp folder, so ring
+         events were silently dropped when the DLL was extracted. NegroPos
+         ships the same way. The .NET runtime itself still self-extracts
+         (IncludeNativeLibrariesForSelfExtract=true). -->
     <SelfContained>true</SelfContained>
     <PublishSingleFile>true</PublishSingleFile>
     <PublishTrimmed>false</PublishTrimmed>
     <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
-    <IncludeAllContentForSelfExtract>true</IncludeAllContentForSelfExtract>
+    <IncludeAllContentForSelfExtract>false</IncludeAllContentForSelfExtract>
     <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
   </PropertyGroup>

@@ -49,6 +49,29 @@ internal static class Program
         "ProTakipCallerBridge");
     private static readonly string LogPath = Path.Combine(LogDir, "bridge.log");
 
+    /// <summary>
+    /// Bridge version string shown in the log header, StatusForm subtitle,
+    /// and tray tooltip so Hakan can tell which build is running during
+    /// deploy testing. Pulled from the compiled assembly
+    /// (AssemblyInformationalVersion or fallback to FileVersion) — csproj
+    /// and GitHub Actions stamp it at build time with run_number.
+    /// </summary>
+    internal static string AppVersion { get; } = ComputeVersion();
+
+    private static string ComputeVersion()
+    {
+        var asm = typeof(Program).Assembly;
+        var info = asm.GetCustomAttributes(typeof(System.Reflection.AssemblyInformationalVersionAttribute), false);
+        if (info.Length > 0)
+        {
+            var raw = ((System.Reflection.AssemblyInformationalVersionAttribute)info[0]).InformationalVersion;
+            // Strip SourceLink "+commit" suffix if present.
+            var plus = raw.IndexOf('+');
+            return plus > 0 ? raw[..plus] : raw;
+        }
+        return asm.GetName().Version?.ToString() ?? "dev";
+    }
+
     [STAThread]
     private static void Main()
     {
@@ -57,6 +80,7 @@ internal static class Program
         // to bridge.log and pops a MessageBox so the user can see it.
         try { Directory.CreateDirectory(LogDir); } catch { /* best effort */ }
         Log("=== Bridge starting ===");
+        Log($"Version: {AppVersion}");
         Log($"Exe: {Environment.ProcessPath}");
         Log($"BaseDir: {AppContext.BaseDirectory}");
         Log($"OS: {Environment.OSVersion}  |  x64: {Environment.Is64BitProcess}");
@@ -263,7 +287,8 @@ internal static class Program
             state = TrayState.Ok;
         }
 
-        _tray.Text = $"ProTakip Caller Id — {titleSuffix}";
+        // Tray tooltip max 63 chars on Win10; version kısaltılıp gösteriliyor.
+        _tray.Text = $"ProTakip Caller Id v{AppVersion} — {titleSuffix}";
         _tray.Icon?.Dispose();
         _tray.Icon = BuildTrayIcon(state);
     }
