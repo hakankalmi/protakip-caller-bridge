@@ -27,7 +27,11 @@
     <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
     <IncludeAllContentForSelfExtract>false</IncludeAllContentForSelfExtract>
     <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
-    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <!-- 32-bit process: Test.exe vendor uygulaması da 32-bit (PE32 header)
+         ve cidshow_x86/cid.dll yükleyip çalışıyor. cidshow_x64/cid.dll
+         CID v6 cihazı için CallerID event'ini fire etmiyor (Signal çalışıyor
+         ama arama yakalanmıyor — 2 gün test sonucu). 32-bit DLL güvenli. -->
+    <RuntimeIdentifier>win-x86</RuntimeIdentifier>
   </PropertyGroup>
 
   <ItemGroup>
