@@ -47,16 +47,30 @@ jobs:
           Compress-Archive -Path publish\* -DestinationPath ProTakipCallerBridge.zip -Force
           Get-Item ProTakipCallerBridge.zip | Format-List Length
 
-      - name: Build vendor-test (.NET Framework 4.8, vendor Form1.cs birebir)
+      - name: Build vendor-test (.NET Framework 4.0, vendor Form1.cs birebir)
         shell: pwsh
         run: |
-          # Isolated diagnostic build: vendor sample kodu olduğu gibi,
-          # .NET Framework 4.8 target. Eğer bu exe de aramaları
-          # yakalamazsa DLL cihazın CallerID event'ini vermiyor demektir
-          # (bizim .NET 8 kodumuzda değil, SDK'nın kendisinde sorun var).
           dotnet build vendor-test/VendorTest.csproj -c Release -o vendor-test-publish
           Compress-Archive -Path vendor-test-publish\VendorTest.exe,vendor-test-publish\cidshow_x64,vendor-test-publish\cidshow_x86 -DestinationPath VendorTest.zip -Force
           Get-Item VendorTest.zip | Format-List Length
+
+      - name: Build bridge-com (.NET Framework 4.0 + cidv5callerid COM — ASIL BRIDGE)
+        shell: pwsh
+        run: |
+          # cid.dll SetEvents API'si CID v6 için CallerID event fire etmiyor
+          # (sadece Signal heartbeat). Vendor "Cihaz Test" uygulaması
+          # cidv5callerid ActiveX COM kullanıyor, NegroPos da aynısını
+          # kullandı. Bridge'i COM tabanlı yeniden yazdık.
+          dotnet build bridge-com/BridgeCom.csproj -c Release -o bridge-com-publish
+          # exe + 2 Interop DLL'i + exe.config zip'e
+          $items = @(
+            "bridge-com-publish\ProTakipCallerBridgeCom.exe",
+            "bridge-com-publish\ProTakipCallerBridgeCom.exe.config",
+            "bridge-com-publish\AxInterop.cidv5callerid.dll",
+            "bridge-com-publish\Interop.cidv5callerid.dll"
+          )
+          Compress-Archive -Path $items -DestinationPath ProTakipCallerBridgeCom.zip -Force
+          Get-Item ProTakipCallerBridgeCom.zip | Format-List Length
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
@@ -65,6 +79,7 @@ jobs:
           path: |
             ProTakipCallerBridge.zip
             VendorTest.zip
+            ProTakipCallerBridgeCom.zip
           retention-days: 30
 
   deploy:
@@ -85,7 +100,7 @@ jobs:
           username: root
           key: ${{ secrets.HETZNER_SSH_KEY }}
           port: 22
-          source: "ProTakipCallerBridge.zip,VendorTest.zip"
+          source: "ProTakipCallerBridge.zip,VendorTest.zip,ProTakipCallerBridgeCom.zip"
           target: /var/www/html/downloads/
           timeout: 30s
           command_timeout: 60s
