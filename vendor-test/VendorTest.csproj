@@ -1,7 +1,12 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
-    <TargetFramework>net48</TargetFramework>
+    <!-- Vendor csproj net v2.0. Modern dotnet SDK net35 build edemiyor
+         (ResGen.exe .NET Core MSBuild'de yok). net40 en eski desteklenen
+         target — .NET Framework 4.0 runtime, delegate marshalling &
+         P/Invoke davranışları vendor'dan minimal farklı. Windows 10/11
+         zaten .NET Framework 4.8 ile geliyor (4.0 backward-compatible). -->
+    <TargetFramework>net40</TargetFramework>
     <UseWindowsForms>true</UseWindowsForms>
     <RootNamespace>WindowsFormsApplication1</RootNamespace>
     <AssemblyName>VendorTest</AssemblyName>
