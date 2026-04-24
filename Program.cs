@@ -43,6 +43,7 @@ internal static class Program
     /// </summary>
     private static StatusForm? _statusForm;
     private static bool _backendReachable = true;
+    private static int _consecutive401;
 
     private static readonly string LogDir = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
@@ -159,19 +160,19 @@ internal static class Program
             _statusForm.UpdateNetgsm(NetgsmState.Disabled);
 
             // Hook cid.dll INSIDE the StatusForm's Load event — vendor
-            // sample Form1 does the same. CIDSHOW records the calling
-            // thread's window message queue during SetEvents; if we hook
-            // before Application.Run starts the pump, the DLL can't post
-            // CallerID events (Signal works because it runs on its own
-            // polling thread). StatusForm.Load fires AFTER the pump is
-            // up and the window is alive — exactly the timing the DLL
-            // expects.
+            // sample Form1 does the same. Delegate instances are created
+            // EXPLICITLY with `new` (vendor pattern) and kept in static
+            // fields inside CidInterop to stop the GC from freeing them
+            // under the DLL's feet. Implicit method-group conversion
+            // sometimes confuses the marshaller about delegate identity.
             _statusForm.Load += (_, _) =>
             {
                 try
                 {
-                    CidInterop.SetEvents(OnCallerId, OnSignal);
-                    Log("cid.dll SetEvents hooked (inside Load event, message pump alive)");
+                    var callerIdDelegate = new CidInterop.CallerIdCallback(OnCallerId);
+                    var signalDelegate = new CidInterop.SignalCallback(OnSignal);
+                    CidInterop.SetEvents(callerIdDelegate, signalDelegate);
+                    Log("cid.dll SetEvents hooked (inside Load event — vendor pattern)");
                 }
                 catch (Exception ex)
                 {
@@ -185,17 +186,14 @@ internal static class Program
                 }
             };
 
-            // StatusForm ilk startup'ta HIDDEN açılsın ama Load event'i
-            // fire etsin: Show() sonra Hide(). Kullanıcı tray'den double-
-            // click ile tekrar açacak. Message loop StatusForm ile başlar.
+            // StatusForm açık ve görünür kalıyor — vendor Form1 de böyle.
+            // Hidden form'a DLL'in post ettiği mesajlar bazen drop olabiliyor
+            // (belki DefWindowProc'a ulaşmıyor), bu teoriyi elimine etmek
+            // için form startup'ta normal şekilde açık. Kullanıcı rahatsız
+            // olursa X tuşuyla kapatır → zaten `FormClosing` handler'ımız
+            // bunu tray'e minimize ediyor (gerçek close yok).
             _statusForm.WindowState = FormWindowState.Normal;
-            _statusForm.ShowInTaskbar = false;
-            _statusForm.Shown += (_, _) =>
-            {
-                // Show event Load sonrası gelir; hemen gizle.
-                _statusForm?.Hide();
-                _statusForm!.ShowInTaskbar = true; // subsequent show'larda taskbar'da olsun
-            };
+            _statusForm.ShowInTaskbar = true;
 
             // If we aren't paired yet, block on the pair dialog before
             // starting the message loop. Pair finishes → Application.Run
@@ -216,13 +214,19 @@ internal static class Program
             {
                 if (!_cfg.IsPaired) return;
                 bool pingOk = false;
+                string? pingDetail = null;
                 try
                 {
                     var (ok, detail) = await _api.PingAsync();
                     pingOk = ok;
+                    pingDetail = detail;
                     if (!ok) Log("Ping failed — " + detail);
                 }
-                catch (Exception ex) { Log("Ping threw: " + ex.Message); }
+                catch (Exception ex)
+                {
+                    Log("Ping threw: " + ex.Message);
+                    pingDetail = ex.Message;
+                }
 
                 // Tray icon reflects backend reachability — amber while
                 // eşleşme bekleniyor, green on success, red if pings keep
@@ -232,6 +236,30 @@ internal static class Program
                 {
                     _backendReachable = pingOk;
                     _ui?.Post(_ => UpdateTrayState(), null);
+                }
+
+                // 401 is special — it means our device token is no longer
+                // accepted (pair row deleted, token reset, whatever). No
+                // amount of retry will recover; user needs to re-pair.
+                // Surface a tray balloon on the first 401 so they know.
+                if (!pingOk && (pingDetail?.Contains("401") ?? false))
+                {
+                    _consecutive401++;
+                    if (_consecutive401 == 1)
+                    {
+                        _ui?.Post(_ =>
+                        {
+                            _tray?.ShowBalloonTip(
+                                8000,
+                                "Eşleşme geçersiz",
+                                "Sunucu bu köprüyü tanımıyor. Tray simgesine sağ tıklayıp 'Yeniden eşleştir' seçin.",
+                                ToolTipIcon.Warning);
+                        }, null);
+                    }
+                }
+                else if (pingOk)
+                {
+                    _consecutive401 = 0;
                 }
 
                 // Best-effort PBX reconcile — any error just keeps the
