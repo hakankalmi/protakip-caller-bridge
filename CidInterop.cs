@@ -94,6 +94,15 @@ public static class CidInterop
 
 
     /// <summary>Fires when the device detects an incoming call.</summary>
+    /// <remarks>
+    /// <c>UnmanagedFunctionPointer</c> makes the calling convention on
+    /// the delegate explicit. Without it .NET 8 defaults to StdCall while
+    /// cid.dll (built with a C toolchain) calls back Cdecl — stack
+    /// pointer corruption on return, callback silently dropped. Vendor
+    /// sample gets away without the attribute on .NET Framework 2.0
+    /// where the default differs; on .NET 8 we must be explicit.
+    /// </remarks>
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
     public delegate void CallerIdCallback(
         [MarshalAs(UnmanagedType.BStr)] string deviceSerial,
         [MarshalAs(UnmanagedType.BStr)] string line,
@@ -105,6 +114,7 @@ public static class CidInterop
     /// Fires roughly every second with device presence + line signal
     /// strengths. Gives us the "Is the box plugged in?" heartbeat.
     /// </summary>
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
     public delegate void SignalCallback(
         [MarshalAs(UnmanagedType.BStr)] string deviceModel,
         [MarshalAs(UnmanagedType.BStr)] string deviceSerial,
