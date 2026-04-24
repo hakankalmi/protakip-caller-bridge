@@ -93,42 +93,50 @@ public static class CidInterop
     }
 
 
+    // ── KRİTİK —  DLL imzası vendor C# örneğinden FARKLI. ────────────
+    // Delphi source (Unit1.pas, vendor'un kendi Test.exe'sinin kaynağı):
+    //
+    //   TCallerID = procedure(const DeviceSerial: PWideChar; ...) stdcall;
+    //
+    // Yani:
+    //   * Calling convention = stdcall  (Cdecl DEĞİL)
+    //   * String tipi         = PWideChar / LPWStr  (BSTR DEĞİL)
+    //   * Charset             = Unicode (UTF-16)     (Ansi DEĞİL)
+    //
+    // Vendor C# örneği (cidshow_CSharpAnyCPU) yanlış yazılmış; Delphi
+    // Test.exe çalışıyor ama C# örneği bile çalışmıyor. Signal callback
+    // integer parametre olduğu için calling-convention farkı tolere
+    // ediliyordu, CallerID ise BSTR marshal sırasında crash → callback
+    // sessiz düşüyordu. Bu imzalar Delphi source ile BİREBİR.
+
     /// <summary>Fires when the device detects an incoming call.</summary>
-    /// <remarks>
-    /// <c>UnmanagedFunctionPointer</c> makes the calling convention on
-    /// the delegate explicit. Without it .NET 8 defaults to StdCall while
-    /// cid.dll (built with a C toolchain) calls back Cdecl — stack
-    /// pointer corruption on return, callback silently dropped. Vendor
-    /// sample gets away without the attribute on .NET Framework 2.0
-    /// where the default differs; on .NET 8 we must be explicit.
-    /// </remarks>
-    [UnmanagedFunctionPointer(CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    [UnmanagedFunctionPointer(CallingConvention.StdCall, CharSet = CharSet.Unicode)]
     public delegate void CallerIdCallback(
-        [MarshalAs(UnmanagedType.BStr)] string deviceSerial,
-        [MarshalAs(UnmanagedType.BStr)] string line,
-        [MarshalAs(UnmanagedType.BStr)] string phoneNumber,
-        [MarshalAs(UnmanagedType.BStr)] string dateTime,
-        [MarshalAs(UnmanagedType.BStr)] string other);
+        [MarshalAs(UnmanagedType.LPWStr)] string deviceSerial,
+        [MarshalAs(UnmanagedType.LPWStr)] string line,
+        [MarshalAs(UnmanagedType.LPWStr)] string phoneNumber,
+        [MarshalAs(UnmanagedType.LPWStr)] string dateTime,
+        [MarshalAs(UnmanagedType.LPWStr)] string other);
 
     /// <summary>
     /// Fires roughly every second with device presence + line signal
     /// strengths. Gives us the "Is the box plugged in?" heartbeat.
     /// </summary>
-    [UnmanagedFunctionPointer(CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    [UnmanagedFunctionPointer(CallingConvention.StdCall, CharSet = CharSet.Unicode)]
     public delegate void SignalCallback(
-        [MarshalAs(UnmanagedType.BStr)] string deviceModel,
-        [MarshalAs(UnmanagedType.BStr)] string deviceSerial,
+        [MarshalAs(UnmanagedType.LPWStr)] string deviceModel,
+        [MarshalAs(UnmanagedType.LPWStr)] string deviceSerial,
         int signal1,
         int signal2,
         int signal3,
         int signal4);
 
     [DllImport("cidshow_x64/cid.dll", EntryPoint = "SetEvents",
-        CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+        CallingConvention = CallingConvention.StdCall, CharSet = CharSet.Unicode)]
     private static extern void SetEventsX64(CallerIdCallback callerId, SignalCallback signal);
 
     [DllImport("cidshow_x86/cid.dll", EntryPoint = "SetEvents",
-        CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+        CallingConvention = CallingConvention.StdCall, CharSet = CharSet.Unicode)]
     private static extern void SetEventsX86(CallerIdCallback callerId, SignalCallback signal);
 
     // Roots — never let these get GC'd after SetEvents returns. The DLL
