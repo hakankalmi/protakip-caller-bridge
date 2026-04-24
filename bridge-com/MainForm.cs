@@ -49,31 +49,58 @@ namespace ProTakipCallerBridgeCom
 
         public MainForm()
         {
-            // CheckForIllegalCrossThreadCalls tamamen vendor Form1 ile aynı
-            // davranış için disable. ActiveX COM event'leri genelde ana UI
-            // thread'inde gelir ama her ihtimale karşı güvenceye alıyoruz.
+            Program.LogLine("MainForm ctor: başladı");
             CheckForIllegalCrossThreadCalls = false;
 
             Directory.CreateDirectory(ConfigDir);
             LoadConfig();
+            Program.LogLine("MainForm ctor: config yüklendi (token len=" + _deviceToken.Length + ")");
 
             Text = "ProTakip Caller Id — COM";
             ClientSize = new Size(640, 460);
             StartPosition = FormStartPosition.CenterScreen;
             FormBorderStyle = FormBorderStyle.FixedDialog;
             MaximizeBox = false;
+            Program.LogLine("MainForm ctor: form özellikleri set edildi");
 
-            // ActiveX control — invisible, sadece event alıyor.
-            _cid = new Axcidv5callerid.AxCIDv5
+            // ActiveX control oluşturma en riskli kısım — cidv5callerid.dll
+            // sistemde regsvr32 ile kayıtlı değilse burada COMException
+            // fırlar. Hata logu ile kullanıcıya ne olduğunu göstermek için
+            // sarmaladık.
+            try
             {
-                Visible = false,
-                Location = new Point(0, 0),
-                Size = new Size(10, 10),
-            };
-            ((ISupportInitialize)_cid).BeginInit();
-            Controls.Add(_cid);
-            ((ISupportInitialize)_cid).EndInit();
-            _cid.OnCallerID += Cid_OnCallerID;
+                Program.LogLine("ActiveX control instantiating: Axcidv5callerid.AxCIDv5");
+                _cid = new Axcidv5callerid.AxCIDv5
+                {
+                    Visible = false,
+                    Location = new Point(0, 0),
+                    Size = new Size(10, 10),
+                };
+                Program.LogLine("ActiveX control instantiated OK");
+
+                ((ISupportInitialize)_cid).BeginInit();
+                Program.LogLine("ActiveX BeginInit OK");
+
+                Controls.Add(_cid);
+                Program.LogLine("ActiveX Controls.Add OK");
+
+                ((ISupportInitialize)_cid).EndInit();
+                Program.LogLine("ActiveX EndInit OK — COM object fully initialized");
+
+                _cid.OnCallerID += Cid_OnCallerID;
+                Program.LogLine("ActiveX OnCallerID event handler subscribed");
+            }
+            catch (Exception ex)
+            {
+                Program.LogLine("ActiveX init FAILED: " + ex.GetType().Name + ": " + ex.Message);
+                Program.LogLine(ex.ToString());
+                MessageBox.Show(
+                    "Caller ID COM bileşeni yüklenemedi:\n\n" + ex.Message +
+                    "\n\nMuhtemelen cidv5callerid.dll sistemde kayıtlı değil. NegroPos kurulu mu?",
+                    "ProTakip Caller Id — COM",
+                    MessageBoxButtons.OK, MessageBoxIcon.Error);
+                throw; // kritik hatayı Program.Main yakalayıp görsel gösterecek
+            }
 
             _statusLabel = new Label
             {
