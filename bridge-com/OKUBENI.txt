@@ -1,0 +1,33 @@
+ProTakip Caller Id Bridge — Hızlı Kurulum
+=========================================
+
+1. Bu ZIP dosyasini bir klasore cikarin (ornegin C:\CallerId\).
+
+2. Klasordeki "register.bat" dosyasina SAG TIK → "Yonetici olarak
+   calistir" yapin. Windows UAC penceresi cikar, "Evet" tiklayin.
+   Islem 1 saniye surer, "cidv5callerid.dll basariyla kayit edildi"
+   yazisi cikar.
+
+3. "ProTakipCallerBridgeCom.exe"e cift tiklayin. Form acilir, cihaz
+   bilgisi ekranda gorunur.
+
+4. Eger ilk calistirmada UAC penceresi "cidv5 kayit" icin cikarsa
+   "Evet" tiklayin (2. adimdaki islemin eksik versiyonu).
+
+5. Token alanina bridge device token'ini yapistirin ve Kaydet
+   butonuna basin. (Token web panelde caller id popup'indan gelir.)
+
+6. Bir arama yapin; listboxa kayit dusmeli, web panelde dock acilir.
+
+Log dosyasi: %APPDATA%\ProTakipCallerBridgeCom\bridge.log
+
+---
+
+SORUN: Form aciliyor ama arama gelmiyor?
+- Cihaz (CID v6) test uygulamasinda calisiyor mu kontrol edin.
+- Log dosyasinda "COM OnCallerID fire" satiri var mi bakin.
+- Yoksa register.bat'i tekrar yonetici olarak calistirin.
+
+SORUN: Form hic acilmiyor?
+- register.bat yonetici olarak calismadiysa DLL kayitli degildir.
+- Log dosyasina bakin, tam hata orada.

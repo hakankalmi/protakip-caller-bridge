@@ -13,9 +13,7 @@
     <LangVersion>latest</LangVersion>
   </PropertyGroup>
 
-  <!-- NegroPos'tan alınan ActiveX Interop wrapper'ları. cidv5callerid.dll
-       Hakan'ın PC'sinde zaten kayıtlı (NegroPos yıllardır çalışıyor ve
-       vendor "Cihaz Test" aynı COM'u kullanıyor). -->
+  <!-- NegroPos'tan alınan ActiveX Interop wrapper'ları. -->
   <ItemGroup>
     <Reference Include="AxInterop.cidv5callerid">
       <HintPath>lib\AxInterop.cidv5callerid.dll</HintPath>
@@ -25,5 +23,33 @@
       <HintPath>lib\Interop.cidv5callerid.dll</HintPath>
       <Private>true</Private>
     </Reference>
+  </ItemGroup>
+
+  <!-- cidsetup.exe'den çıkarılmış native COM DLL'leri. Vendor'un sayfası
+       "Native DLL (yeni sürüm) sorunlu — ActiveX (eski sürüm) kullan"
+       diyor. Bu DLL'ler Hakan'ın PC'sinde zaten vardı (NegroPos kurulumdan
+       kalma), biz de paketimize gömüp user deneyimini tekleştiriyoruz:
+       ZIP açılır → register.bat yönetici olarak çalıştırılır → regsvr32
+       cidv5callerid'i sisteme kayıt → exe çalıştırılabilir.
+       Program.cs self-registration da deniyor (UAC prompt). -->
+  <ItemGroup>
+    <Content Include="lib\native-cidv5callerid.dll">
+      <Link>cidv5callerid.dll</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <Content Include="lib\cidv45.dll">
+      <Link>cidv45.dll</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <Content Include="lib\v5_2009.dll">
+      <Link>v5_2009.dll</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <Content Include="register.bat">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <Content Include="OKUBENI.txt">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
   </ItemGroup>
 </Project>

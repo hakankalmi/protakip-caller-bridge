@@ -58,17 +58,14 @@ jobs:
         shell: pwsh
         run: |
           # cid.dll SetEvents API'si CID v6 için CallerID event fire etmiyor
-          # (sadece Signal heartbeat). Vendor "Cihaz Test" uygulaması
-          # cidv5callerid ActiveX COM kullanıyor, NegroPos da aynısını
-          # kullandı. Bridge'i COM tabanlı yeniden yazdık.
+          # (vendor "sorunlu eski model" diyor). Bridge-com cidsetup.exe
+          # içeriğinden çıkarılmış native COM DLL'leri kullanıyor, vendor
+          # Test.exe ile birebir aynı yol.
           dotnet build bridge-com/BridgeCom.csproj -c Release -o bridge-com-publish
-          # exe + 2 Interop DLL'i + exe.config zip'e
-          $items = @(
-            "bridge-com-publish\ProTakipCallerBridgeCom.exe",
-            "bridge-com-publish\ProTakipCallerBridgeCom.exe.config",
-            "bridge-com-publish\AxInterop.cidv5callerid.dll",
-            "bridge-com-publish\Interop.cidv5callerid.dll"
-          )
+
+          # Exe + tüm runtime dosyaları. lib klasörü exclude — root'taki
+          # DLL'ler yeterli.
+          $items = Get-ChildItem bridge-com-publish -File | Select-Object -ExpandProperty FullName
           Compress-Archive -Path $items -DestinationPath ProTakipCallerBridgeCom.zip -Force
           Get-Item ProTakipCallerBridgeCom.zip | Format-List Length
 
