@@ -1,6 +1,7 @@
 using System;
 using System.Diagnostics;
 using System.IO;
+using System.Net;
 using System.Threading;
 using System.Windows.Forms;
 using Microsoft.Win32;
@@ -152,6 +153,25 @@ namespace ProTakipCallerBridgeCom
             LogLine("OS: " + Environment.OSVersion + "  64bit process=" + Environment.Is64BitProcess);
             LogLine("CLR: " + Environment.Version);
             LogLine("Apartment: " + Thread.CurrentThread.GetApartmentState());
+
+            // .NET Framework 4.0 varsayılan TLS 1.0 ile HTTPS'e çıkıyor.
+            // api.protakip.com (ve modern tüm sunucular) TLS 1.2+ istiyor →
+            // HttpWebRequest handshake sırasında "no-response" atıyor. net40'ta
+            // SecurityProtocolType.Tls11 (768) / Tls12 (3072) enum değerleri
+            // YOK; int cast ile manuel veriyoruz. Tls + Tls11 + Tls12 fallback.
+            try
+            {
+                const int TLS11 = 768;
+                const int TLS12 = 3072;
+                ServicePointManager.SecurityProtocol =
+                    (SecurityProtocolType)(TLS11 | TLS12) | SecurityProtocolType.Tls;
+                ServicePointManager.Expect100Continue = false;
+                LogLine("TLS 1.2 enabled (SecurityProtocol=" + (int)ServicePointManager.SecurityProtocol + ")");
+            }
+            catch (Exception ex)
+            {
+                LogLine("TLS config failed: " + ex.Message);
+            }
 
             try
             {
