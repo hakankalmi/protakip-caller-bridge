@@ -21,8 +21,61 @@ namespace ProTakipCallerBridge;
 /// </summary>
 public static class CidInterop
 {
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern bool SetDllDirectory(string lpPathName);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern IntPtr AddDllDirectory(string lpPathName);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool SetDefaultDllDirectories(uint DirectoryFlags);
+
+    private const uint LOAD_LIBRARY_SEARCH_DEFAULT_DIRS = 0x00001000;
+    private const uint LOAD_LIBRARY_SEARCH_USER_DIRS = 0x00000400;
+    private const uint LOAD_LIBRARY_SEARCH_APPLICATION_DIR = 0x00000200;
+    private const uint LOAD_LIBRARY_SEARCH_SYSTEM32 = 0x00000800;
+
     static CidInterop()
     {
+        // The DLL search-path problem, in plain language:
+        //
+        // Self-extracting single-file publish drops cid.dll under the
+        // runtime extract folder (AppContext.BaseDirectory → %TEMP%\.net\...).
+        // SetDllImportResolver handles loading cid.dll itself, but when
+        // cid.dll needs to LoadLibrary a secondary module (caller-id
+        // event module, TSR hook, whatever — signal callback works
+        // without it, the ring event apparently does not), Windows
+        // searches the usual places and *does not* include our extract
+        // folder. LoadLibrary returns NULL → DLL can't hand us the
+        // CallerID callback → rings are silently dropped.
+        //
+        // Fix: add the extract folder to the DLL search path both
+        // legacy (SetDllDirectory) and modern (AddDllDirectory +
+        // SetDefaultDllDirectories) styles. Covers every Windows version
+        // we care about.
+
+        var baseDir = AppContext.BaseDirectory;
+        var cidX64 = Path.Combine(baseDir, "cidshow_x64");
+        var cidX86 = Path.Combine(baseDir, "cidshow_x86");
+
+        try
+        {
+            // Legacy: altername DLL dirs the loader scans after the exe
+            // dir and System32. Still respected by LoadLibrary on every
+            // supported Windows.
+            SetDllDirectory(baseDir);
+
+            // Modern: allowlist-style dirs for LoadLibraryEx. Combined
+            // with SetDefaultDllDirectories these become the *only* dirs
+            // scanned unless the caller opts in to others — safer and
+            // bypasses PATH pollution on secretary PCs.
+            try { SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_DEFAULT_DIRS); } catch { }
+            try { AddDllDirectory(baseDir); } catch { }
+            if (Directory.Exists(cidX64)) try { AddDllDirectory(cidX64); } catch { }
+            if (Directory.Exists(cidX86)) try { AddDllDirectory(cidX86); } catch { }
+        }
+        catch { /* best effort — if these fail cid.dll still loads via the resolver */ }
+
         // Rewrite "cidshow_x64/cid.dll" and "cidshow_x86/cid.dll" to absolute
         // paths in the runtime extract folder. Registered once per process
         // — NativeLibrary remembers the mapping for subsequent calls.
