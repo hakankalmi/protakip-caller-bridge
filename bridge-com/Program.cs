@@ -79,6 +79,35 @@ namespace ProTakipCallerBridgeCom
             }
         }
 
+        /// <summary>
+        /// HKCU\...\Run altına per-user kayıt ekler — yönetici gerekmez,
+        /// Windows oturum açınca bridge otomatik başlar. Idempotent; exe
+        /// yolu değişmediyse tekrar yazmaz.
+        /// </summary>
+        private static void RegisterAutoStart()
+        {
+            const string runKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
+            const string valueName = "ProTakipCallerBridgeCom";
+
+            // net40'ta Environment.ProcessPath yok, Application.ExecutablePath
+            // exe'nin tam yolunu verir.
+            var exePath = Application.ExecutablePath;
+            if (string.IsNullOrEmpty(exePath)) return;
+
+            var quoted = "\"" + exePath + "\"";
+            using var key = Registry.CurrentUser.OpenSubKey(runKey, writable: true);
+            if (key == null) { LogLine("AutoStart: Run key açılamadı"); return; }
+
+            var existing = key.GetValue(valueName) as string;
+            if (existing == quoted)
+            {
+                LogLine("AutoStart: kayıt zaten mevcut — " + quoted);
+                return;
+            }
+            key.SetValue(valueName, quoted);
+            LogLine("AutoStart: kayıt edildi — " + quoted);
+        }
+
         internal static void LogLine(string line)
         {
             try
@@ -131,6 +160,15 @@ namespace ProTakipCallerBridgeCom
             catch (Exception ex)
             {
                 LogLine("COM register attempt failed (non-fatal): " + ex.Message);
+            }
+
+            try
+            {
+                RegisterAutoStart();
+            }
+            catch (Exception ex)
+            {
+                LogLine("Auto-start register failed (non-fatal): " + ex.Message);
             }
 
             try

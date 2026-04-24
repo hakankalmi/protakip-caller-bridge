@@ -38,6 +38,8 @@ namespace ProTakipCallerBridgeCom
         private readonly Label _deviceLabel;
         private readonly TextBox _tokenBox;
         private readonly Button _saveTokenBtn;
+        private NotifyIcon _tray;
+        private bool _reallyExit;
         private string _apiBase = "https://api.protakip.com/api";
         private string _deviceToken = string.Empty;
 
@@ -185,6 +187,97 @@ namespace ProTakipCallerBridgeCom
                 if (!string.IsNullOrEmpty(_deviceToken)) SendPing();
             };
             _pingTimer.Start();
+
+            // Tray icon — form kapatılınca (X) process ölmez, tray'e gizlenir.
+            // Arka planda ActiveX dinlemeye devam eder. Double-click geri açar.
+            InitTray();
+
+            // Minimize veya close → tray'e gizle (gerçek çıkış için tray menüsü).
+            Resize += (_, __) =>
+            {
+                if (WindowState == FormWindowState.Minimized) HideToTray(showBalloon: true);
+            };
+            FormClosing += (_, e) =>
+            {
+                if (_reallyExit) return;
+                e.Cancel = true;
+                HideToTray(showBalloon: true);
+            };
+        }
+
+        private void InitTray()
+        {
+            var iconStream = typeof(MainForm).Assembly.GetManifestResourceStream(
+                "ProTakipCallerBridgeCom.app.ico");
+            Icon trayIcon;
+            try
+            {
+                trayIcon = iconStream != null
+                    ? new Icon(iconStream)
+                    : SystemIcons.Application;
+            }
+            catch
+            {
+                trayIcon = SystemIcons.Application;
+            }
+
+            var menu = new ContextMenuStrip();
+            var openItem = new ToolStripMenuItem("Pencereyi Aç");
+            openItem.Click += (_, __) => ShowFromTray();
+            var exitItem = new ToolStripMenuItem("Çıkış");
+            exitItem.Click += (_, __) =>
+            {
+                _reallyExit = true;
+                _tray.Visible = false;
+                Application.Exit();
+            };
+            menu.Items.Add(openItem);
+            menu.Items.Add(new ToolStripSeparator());
+            menu.Items.Add(exitItem);
+
+            _tray = new NotifyIcon
+            {
+                Icon = trayIcon,
+                Text = "ProTakip Caller Id",
+                Visible = true,
+                ContextMenuStrip = menu,
+            };
+            _tray.DoubleClick += (_, __) => ShowFromTray();
+            Program.LogLine("Tray icon created");
+        }
+
+        private void HideToTray(bool showBalloon)
+        {
+            Hide();
+            ShowInTaskbar = false;
+            if (showBalloon && _tray != null)
+            {
+                _tray.ShowBalloonTip(
+                    3000,
+                    "ProTakip Caller Id çalışıyor",
+                    "Bridge tray'de arka planda dinliyor. Pencereyi tekrar açmak için simgeye çift tıklayın.",
+                    ToolTipIcon.Info);
+            }
+        }
+
+        private void ShowFromTray()
+        {
+            Show();
+            WindowState = FormWindowState.Normal;
+            ShowInTaskbar = true;
+            BringToFront();
+            Activate();
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing && _tray != null)
+            {
+                _tray.Visible = false;
+                _tray.Dispose();
+                _tray = null;
+            }
+            base.Dispose(disposing);
         }
 
         private readonly Timer _pingTimer;
