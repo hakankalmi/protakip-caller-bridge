@@ -21,34 +21,23 @@ jobs:
         run: dotnet publish ProTakipCallerBridge.csproj -c Release -o publish
 
       - name: Upload exe to Hetzner (api.protakip.com/downloads/)
-        shell: pwsh
+        # Battle-tested action — PowerShell'in kendi SSH key/encoding
+        # wrapping'inde UTF-16 BOM, icacls parse bug'ı, multi-line PEM
+        # handling gibi 5 ayrı sorunu birden çözüyor. İçeride native
+        # openssh-client + ssh-keygen çalıştırdığı için key format
+        # ("invalid format") da sorun olmuyor.
+        uses: appleboy/scp-action@v0.1.7
         timeout-minutes: 3
-        env:
-          HETZNER_SSH_KEY: ${{ secrets.HETZNER_SSH_KEY }}
-        run: |
-          $keyPath = Join-Path $env:RUNNER_TEMP "hetzner_id_ed25519"
-          # PowerShell'in default Out-File UTF-16 BOM ekliyor, ssh key'i
-          # bozuluyor. System.IO.File.WriteAllText + ASCII encoding ile
-          # saf ASCII dosya yaz.
-          [System.IO.File]::WriteAllText($keyPath, $env:HETZNER_SSH_KEY, [System.Text.Encoding]::ASCII)
-          # PowerShell 7 (pwsh) "$env:USERNAME:(R)" içindeki `(R)` tokenini
-          # sub-expression olarak parse edip "Invalid parameter" atıyor.
-          # Permission stringini önceden tek değişkende birleştir.
-          $perm = "${env:USERNAME}:(R)"
-          icacls $keyPath /inheritance:r /grant:r $perm | Out-Null
-
-          # Timeout + batch mode: şifre prompt'u çıkarsa anında fail.
-          # Tek denemede bağlanamazsa 15sn içinde hata ver, step timeout'u
-          # da 3dk ile sınırlı → step sonsuza kadar asılı kalmıyor.
-          scp `
-            -o StrictHostKeyChecking=no `
-            -o ConnectTimeout=15 `
-            -o BatchMode=yes `
-            -o ServerAliveInterval=10 `
-            -o ServerAliveCountMax=3 `
-            -i $keyPath `
-            publish/ProTakipCallerBridge.exe `
-            root@37.27.203.254:/var/www/html/downloads/ProTakipCallerBridge.exe
+        with:
+          host: 37.27.203.254
+          username: root
+          key: ${{ secrets.HETZNER_SSH_KEY }}
+          port: 22
+          source: publish/ProTakipCallerBridge.exe
+          target: /var/www/html/downloads/
+          strip_components: 1
+          timeout: 30s
+          command_timeout: 60s
 
       - name: Artifact (always)
         uses: actions/upload-artifact@v4
