@@ -134,6 +134,15 @@ internal static class Program
             _statusForm.UpdateUsb(connected: false, deviceSerial: null, lastSignalAt: null);
             _statusForm.UpdateNetgsm(NetgsmState.Disabled);
 
+            // Force-create the window handle so a message-pumping HWND
+            // exists before we hook cid.dll. CIDSHOW's native callbacks
+            // require a message-loop window on the calling thread; if
+            // we hook with no window the DLL never fires events (OnSignal
+            // also stays silent). The sample Form1.cs hooks inside
+            // Form_Load after the handle exists — same trick here.
+            _ = _statusForm.Handle;
+            Log("Status form HWND allocated — DLL callbacks will have a message pump");
+
             // If we aren't paired yet, block on the pair dialog before hooking
             // the DLL — no point listening for calls we can't forward.
             if (!_cfg.IsPaired)
@@ -172,8 +181,9 @@ internal static class Program
                 bool pingOk = false;
                 try
                 {
-                    pingOk = await _api.PingAsync();
-                    if (!pingOk) Log("Ping returned non-success");
+                    var (ok, detail) = await _api.PingAsync();
+                    pingOk = ok;
+                    if (!ok) Log("Ping failed — " + detail);
                 }
                 catch (Exception ex) { Log("Ping threw: " + ex.Message); }
 
@@ -444,12 +454,22 @@ internal static class Program
         }, null);
     }
 
+    private static bool _firstSignalLogged;
+
     private static void OnSignal(string deviceModel, string deviceSerial,
         int signal1, int signal2, int signal3, int signal4)
     {
         _lastSignalAt = DateTime.UtcNow;
         if (!string.IsNullOrWhiteSpace(deviceSerial))
             _lastDeviceSerial = deviceSerial;
+
+        // Ilk sinyali loga yaz — DLL callback'inin ATEŞLENDIGINI KANITLAMAK
+        // debugging icin kritik. Daha sonra tek tek loglamiyoruz, spam olur.
+        if (!_firstSignalLogged)
+        {
+            _firstSignalLogged = true;
+            Log($"First DLL Signal received — model={deviceModel} serial={deviceSerial} s1={signal1} s2={signal2} s3={signal3} s4={signal4}");
+        }
 
         // USB sinyali geldiğinde status penceresine yansıt. Sinyal her 5-10
         // saniyede bir geliyor — UI'ı yormasın diye sadece değişiklikte

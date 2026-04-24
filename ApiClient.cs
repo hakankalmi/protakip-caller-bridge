@@ -42,20 +42,24 @@ public class ApiClient
     /// <summary>
     /// Heartbeat — bumps the device's LastSeenAt on the server so the web
     /// panel shows us as "Bağlı" during idle periods. Fire every ~60s.
+    /// Returns (success, diagnosticDetail). Detail is populated on
+    /// failure so Program.cs can log WHY ping didn't succeed (401 auth,
+    /// 404 route, DNS, etc.) instead of a useless "non-success".
     /// </summary>
-    public async Task<bool> PingAsync(CancellationToken ct = default)
+    public async Task<(bool ok, string detail)> PingAsync(CancellationToken ct = default)
     {
-        if (string.IsNullOrEmpty(_cfg.DeviceToken)) return false;
+        if (string.IsNullOrEmpty(_cfg.DeviceToken)) return (false, "no device token");
         var req = new HttpRequestMessage(HttpMethod.Post, "caller-id/ping");
         req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _cfg.DeviceToken);
         try
         {
             using var resp = await _http.SendAsync(req, ct);
-            return resp.IsSuccessStatusCode;
+            if (resp.IsSuccessStatusCode) return (true, string.Empty);
+            return (false, $"HTTP {(int)resp.StatusCode} {resp.StatusCode}");
         }
-        catch
+        catch (Exception ex)
         {
-            return false;
+            return (false, ex.GetType().Name + ": " + ex.Message);
         }
     }
 
