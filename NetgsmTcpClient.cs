@@ -164,6 +164,14 @@ public sealed class NetgsmTcpClient : IDisposable
                 accumulator.Remove(0, idx + 2);
 
                 if (frame.Length == 0) continue;
+
+                // Temporary verbose logging — NetGSM'in Cantay gibi yeni
+                // firmalar için hangi scenario/context adlarını kullandığını
+                // doğrulamak için frame'i ham halde log'a yazıyoruz. Arama
+                // yakalama doğrulandıktan sonra bu satırı kaldırabiliriz.
+                var preview = frame.Length > 500 ? frame.Substring(0, 500) + "…" : frame;
+                Log($"Netgsm frame: {preview}");
+
                 await HandleFrameAsync(frame);
             }
         }
@@ -210,6 +218,14 @@ public sealed class NetgsmTcpClient : IDisposable
             scenario == "Inbound_call" ||
             scenario == "InboundtoPBX" ||
             (contextName?.Contains("mesai", StringComparison.OrdinalIgnoreCase) ?? false);
+
+        // Temporary — arama yapıldığında neden match etmediğimizi
+        // anlayabilmek için her frame'in özetini log'la. Sadece scenario
+        // veya customer_num göründüğünde (keep-alive gürültüsü olmadan).
+        if (!string.IsNullOrEmpty(scenario) || !string.IsNullOrEmpty(customerNum))
+        {
+            Log($"Netgsm parse: scenario='{scenario}' context='{contextName}' num='{customerNum}' isIncoming={isIncoming}");
+        }
 
         if (!isIncoming) return;
         if (string.IsNullOrWhiteSpace(customerNum)) return;
