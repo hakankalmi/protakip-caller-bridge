@@ -8,8 +8,11 @@
     <UseWindowsForms>true</UseWindowsForms>
     <RootNamespace>ProTakipCallerBridgeCom</RootNamespace>
     <AssemblyName>ProTakipCallerBridgeCom</AssemblyName>
-    <PlatformTarget>AnyCPU</PlatformTarget>
-    <Prefer32Bit>false</Prefer32Bit>
+    <!-- Native cidv5callerid.dll 32-bit (vendor Test.exe da 32-bit).
+         AnyCPU/64-bit process olunca Interop BadImageFormatException
+         fırlatır. x86 zorunlu. -->
+    <PlatformTarget>x86</PlatformTarget>
+    <Prefer32Bit>true</Prefer32Bit>
     <LangVersion>latest</LangVersion>
   </PropertyGroup>
 
