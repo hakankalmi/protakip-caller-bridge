@@ -35,19 +35,22 @@
          SignalR on this side — the hub only serves browser clients. -->
   </ItemGroup>
 
-  <!-- Native caller-id DLLs shipped alongside the exe. Runtime auto-picks
-       x64 or x86 via P/Invoke based on process bitness — we always ship both
-       so the same publish folder works on either. Content Include rather
-       than None Update so the DLLs are picked up even though MSBuild has no
-       prior knowledge of them. -->
+  <!-- Native caller-id DLLs shipped alongside the exe. `ExcludeFromSingleFile=true`
+       keeps them out of the single-file bundle so they land side-by-side
+       (`cidshow_x64\cid.dll` and `cidshow_x86\cid.dll` next to the exe).
+       Windows LoadLibrary then resolves any secondary modules cid.dll
+       pulls in from the exe's directory — matches how NegroPos shipped
+       and how the vendor "Cihaz Test" sample expects the files. -->
   <ItemGroup>
     <Content Include="cidshow_x64\cid.dll">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+      <ExcludeFromSingleFile>true</ExcludeFromSingleFile>
     </Content>
     <Content Include="cidshow_x86\cid.dll">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+      <ExcludeFromSingleFile>true</ExcludeFromSingleFile>
     </Content>
   </ItemGroup>
 
