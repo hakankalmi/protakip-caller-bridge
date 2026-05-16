@@ -19,16 +19,40 @@ namespace ProTakipCallerBridge;
 /// Whichever fires first, the <c>customer_num</c> field is extracted and
 /// handed to the supplied callback (which posts it to /caller-id/ingest).
 ///
-/// On socket drop or auth failure we wait 10 seconds and re-connect until
-/// <see cref="Stop"/> is called, so transient NetGSM outages recover without
-/// user intervention.
+/// On socket drop we back off exponentially (10s → 30s → 60s → 120s → 300s
+/// ceiling) and re-connect until <see cref="Stop"/> is called, so transient
+/// NetGSM outages recover without user intervention. On auth rejection (wrong
+/// username/password) we wait the ceiling delay since retrying every 10s would
+/// just spam NetGSM with rejected logins until they IP-ban us — and the
+/// credentials can only be fixed by the user on the web panel.
+///
+/// State transitions are published via <see cref="StateChanged"/> so the
+/// status form can show "Bağlanıyor / Bağlı / Yanlış kullanıcı adı veya
+/// parola / Bağlantı kesildi" — without UI feedback the secretary stares
+/// at an amber "Bağlanıyor…" forever and never knows credentials were
+/// wrong.
 ///
 /// This class runs 100% inside the bridge on the secretary's PC — the backend
 /// never opens its own socket, keeping server-side state at zero for all firms.
 /// </summary>
 public sealed class NetgsmTcpClient : IDisposable
 {
-    private const int ReconnectDelaySeconds = 10;
+    /// <summary>
+    /// Reconnect delay schedule (seconds). Each consecutive failure picks the
+    /// next bucket; final value (300s) is the ceiling. Resets to bucket #0
+    /// the moment we receive a successful "login Successful" frame.
+    /// </summary>
+    private static readonly int[] ReconnectScheduleSeconds = { 10, 30, 60, 120, 300 };
+
+    /// <summary>
+    /// Delay used after an authentication rejection. Same as the ceiling — no
+    /// point retrying every 10s when the credentials are wrong; user has to
+    /// fix them on the web panel. Bridge keeps polling the backend
+    /// <c>/caller-id/pbx-config</c> every 60s, so the moment Hakan updates
+    /// credentials Program.cs tears this client down and starts a new one
+    /// with the new password, which short-circuits this wait.
+    /// </summary>
+    private const int AuthRejectedRetryDelaySeconds = 300;
 
     private readonly string _host;
     private readonly int _port;
@@ -40,7 +64,25 @@ public sealed class NetgsmTcpClient : IDisposable
     private readonly CancellationTokenSource _cts = new();
     private Task? _loop;
 
+    /// <summary>
+    /// Number of consecutive failed connection attempts. Resets to 0 on a
+    /// successful login frame (NOT on TCP connect — NetGSM can accept the
+    /// socket and then reject credentials, which is a failure for our
+    /// purposes). Used to pick the next bucket in
+    /// <see cref="ReconnectScheduleSeconds"/>.
+    /// </summary>
+    private int _consecutiveFailures;
+
     public string Version { get; }
+
+    /// <summary>
+    /// Raised every time the subscriber transitions between connection
+    /// states. Always fires on the worker task — handlers must marshal to
+    /// the UI thread themselves. <c>detail</c> is a human-readable hint
+    /// (e.g. "Yanlış kullanıcı adı veya parola", "30 sn sonra yeniden
+    /// bağlanılacak"); null if the state itself is self-explanatory.
+    /// </summary>
+    public event Action<NetgsmConnectionState, string?>? StateChanged;
 
     public NetgsmTcpClient(
         string host,
@@ -81,6 +123,11 @@ public sealed class NetgsmTcpClient : IDisposable
     {
         while (!ct.IsCancellationRequested)
         {
+            RaiseState(NetgsmConnectionState.Connecting, null);
+
+            bool authRejected = false;
+            string? errorDetail = null;
+
             try
             {
                 await ConnectOnceAsync(ct);
@@ -89,18 +136,70 @@ public sealed class NetgsmTcpClient : IDisposable
             {
                 return;
             }
+            catch (AuthRejectedException ex)
+            {
+                authRejected = true;
+                errorDetail = ex.Message;
+            }
             catch (Exception ex)
             {
+                errorDetail = ex.Message;
                 Log($"Netgsm loop error: {ex.Message}");
             }
 
             if (ct.IsCancellationRequested) return;
 
-            // Back off before reconnecting so a misconfigured credential
-            // doesn't hammer NetGSM with rejected login attempts.
-            try { await Task.Delay(TimeSpan.FromSeconds(ReconnectDelaySeconds), ct); }
+            _consecutiveFailures++;
+
+            int delaySeconds;
+            if (authRejected)
+            {
+                // Wrong credentials — UI shows "Yanlış kullanıcı adı veya
+                // parola", stop hammering NetGSM. Bridge reconfigures itself
+                // when Hakan updates credentials on the web panel
+                // (ReconcileNetgsmAsync sees a version bump → tears us down
+                // and starts a new client → this wait is interrupted by
+                // CancellationToken).
+                delaySeconds = AuthRejectedRetryDelaySeconds;
+                RaiseState(NetgsmConnectionState.AuthRejected, errorDetail);
+            }
+            else
+            {
+                delaySeconds = NextReconnectDelaySeconds();
+                RaiseState(NetgsmConnectionState.Disconnected,
+                    $"{delaySeconds} sn sonra yeniden bağlanılacak");
+            }
+
+            Log($"Netgsm reconnecting in {delaySeconds}s (consecutive failures: {_consecutiveFailures}, authRejected: {authRejected})");
+
+            try { await Task.Delay(TimeSpan.FromSeconds(delaySeconds), ct); }
             catch (OperationCanceledException) { return; }
         }
+    }
+
+    /// <summary>
+    /// Picks the reconnect delay based on how many failures have piled up.
+    /// Past the end of <see cref="ReconnectScheduleSeconds"/> we stay at the
+    /// ceiling (300s) until login succeeds, at which point the counter is
+    /// reset to zero by <see cref="HandleFrameAsync"/>.
+    /// </summary>
+    private int NextReconnectDelaySeconds()
+    {
+        // _consecutiveFailures has already been incremented for this attempt,
+        // so the FIRST failure (= 1) maps to bucket 0 (= 10s).
+        var idx = Math.Min(_consecutiveFailures - 1, ReconnectScheduleSeconds.Length - 1);
+        return ReconnectScheduleSeconds[Math.Max(0, idx)];
+    }
+
+    /// <summary>
+    /// Thrown by <see cref="HandleFrameAsync"/> when NetGSM rejects the login
+    /// packet — bubbles up through <see cref="ConnectOnceAsync"/> to
+    /// <see cref="RunAsync"/>, which then uses the longer ceiling delay
+    /// instead of the normal backoff schedule.
+    /// </summary>
+    private sealed class AuthRejectedException : Exception
+    {
+        public AuthRejectedException(string detail) : base(detail) { }
     }
 
     private async Task ConnectOnceAsync(CancellationToken ct)
@@ -115,9 +214,10 @@ public sealed class NetgsmTcpClient : IDisposable
         // Login packet — NegroPos paritesi. crm_id INTEGER string olmalı
         // (rnd.Next().ToString()). Guid/hex verince NetGSM login'i sessizce
         // reject ediyor; cevap/hata frame'i dahi atmıyor, socket açık kalıp
-        // event akmıyor. Random.Next int32 üretir, NetGSM bunu dedup için
-        // session tag olarak saklıyor.
-        var crmId = new Random().Next(100_000, int.MaxValue).ToString();
+        // event akmıyor. Random.Shared (.NET 6+) thread-safe ve seeded —
+        // birden çok bridge aynı saniyede başlatılırsa session collision
+        // riskini düşürür (eski `new Random()` time-seeded'idi).
+        var crmId = Random.Shared.Next(100_000, int.MaxValue).ToString();
         var loginPayload = JsonSerializer.Serialize(new
         {
             command = "login",
@@ -245,13 +345,18 @@ public sealed class NetgsmTcpClient : IDisposable
         if (json.IndexOf("login Successful", StringComparison.OrdinalIgnoreCase) >= 0)
         {
             Log("Netgsm login OK");
+            _consecutiveFailures = 0;
+            RaiseState(NetgsmConnectionState.Connected, null);
             return;
         }
         if (json.IndexOf("Yanlis kullanici", StringComparison.OrdinalIgnoreCase) >= 0 ||
-            json.IndexOf("wrong username", StringComparison.OrdinalIgnoreCase) >= 0)
+            json.IndexOf("wrong username", StringComparison.OrdinalIgnoreCase) >= 0 ||
+            json.IndexOf("invalid password", StringComparison.OrdinalIgnoreCase) >= 0)
         {
             Log($"Netgsm login REJECTED: {json}");
-            return;
+            // Throw → unwind to RunAsync, which uses AuthRejectedRetryDelaySeconds
+            // and raises NetgsmConnectionState.AuthRejected on the UI side.
+            throw new AuthRejectedException("Yanlış kullanıcı adı veya parola");
         }
         // JSON değilse ve tanıdık bir plain-text de değilse — log at, parse atla.
         if (json.Length == 0 || json[0] != '{')
@@ -264,6 +369,23 @@ public sealed class NetgsmTcpClient : IDisposable
         {
             using var doc = JsonDocument.Parse(json);
             if (doc.RootElement.ValueKind != JsonValueKind.Object) return;
+
+            // The login-success JSON variant — server sometimes wraps the
+            // string in {"status":"Success","message":"login Successful"}.
+            // Check both ways; without this the JSON variant slips past the
+            // plain-text check above and Connected state never fires.
+            if (doc.RootElement.TryGetProperty("status", out var statusProp) &&
+                statusProp.ValueKind == JsonValueKind.String &&
+                string.Equals(statusProp.GetString(), "Success", StringComparison.OrdinalIgnoreCase) &&
+                doc.RootElement.TryGetProperty("message", out var msgProp) &&
+                msgProp.ValueKind == JsonValueKind.String &&
+                (msgProp.GetString()?.IndexOf("login", StringComparison.OrdinalIgnoreCase) ?? -1) >= 0)
+            {
+                Log("Netgsm login OK (JSON variant)");
+                _consecutiveFailures = 0;
+                RaiseState(NetgsmConnectionState.Connected, null);
+                return;
+            }
 
             foreach (var prop in doc.RootElement.EnumerateObject())
             {
@@ -318,8 +440,38 @@ public sealed class NetgsmTcpClient : IDisposable
         }
     }
 
+    private void RaiseState(NetgsmConnectionState state, string? detail)
+    {
+        try
+        {
+            StateChanged?.Invoke(state, detail);
+        }
+        catch (Exception ex)
+        {
+            // A buggy subscriber must not bring down the reconnect loop.
+            Log($"StateChanged handler threw: {ex.Message}");
+        }
+    }
+
     private void Log(string message)
     {
         _log?.Invoke(message);
     }
+}
+
+/// <summary>
+/// Connection states published via <see cref="NetgsmTcpClient.StateChanged"/>.
+/// Mapped 1:1 to the <see cref="NetgsmState"/> the status form understands —
+/// kept as a separate enum so the client doesn't depend on WinForms types.
+/// </summary>
+public enum NetgsmConnectionState
+{
+    /// <summary>TCP connect + login packet sent, waiting for response.</summary>
+    Connecting,
+    /// <summary>"login Successful" frame received — events should start flowing.</summary>
+    Connected,
+    /// <summary>NetGSM rejected the login. Manual fix required (credentials).</summary>
+    AuthRejected,
+    /// <summary>Socket dropped or unrecoverable error; reconnect timer running.</summary>
+    Disconnected,
 }

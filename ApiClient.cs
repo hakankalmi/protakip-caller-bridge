@@ -116,6 +116,27 @@ public class ApiClient
             return null;
         }
     }
+
+    /// <summary>
+    /// Polls <c>/caller-id/latest-version</c> for the newest published bridge
+    /// build. Anonymous (no Bearer needed) so even unpaired bridges can be
+    /// notified about updates. Returns null on any network/parse error or
+    /// HTTP failure (including 404 — backend may not have shipped the
+    /// endpoint yet, in which case bridge silently skips the check).
+    /// </summary>
+    public async Task<UpdateInfo?> CheckLatestVersionAsync(CancellationToken ct = default)
+    {
+        try
+        {
+            using var resp = await _http.GetAsync("caller-id/latest-version", ct);
+            if (!resp.IsSuccessStatusCode) return null;
+            return await resp.Content.ReadFromJsonAsync<UpdateInfo>(cancellationToken: ct);
+        }
+        catch
+        {
+            return null;
+        }
+    }
 }
 
 public class ClaimResponse
@@ -135,4 +156,18 @@ public class PbxConfigResponse
     public string? Username { get; set; }
     public string? Password { get; set; }
     public string? Version { get; set; }
+}
+
+/// <summary>
+/// Payload returned by <c>/caller-id/latest-version</c>. <see cref="Version"/>
+/// is a four-part Windows version string ("1.0.0.47" style — same shape as
+/// <c>Program.AppVersion</c>). <see cref="DownloadUrl"/> points at the ZIP
+/// the user should grab; we don't auto-download here, the user clicks the
+/// tray-balloon link.
+/// </summary>
+public class UpdateInfo
+{
+    public string Version { get; set; } = string.Empty;
+    public string DownloadUrl { get; set; } = string.Empty;
+    public string? ReleaseNotes { get; set; }
 }

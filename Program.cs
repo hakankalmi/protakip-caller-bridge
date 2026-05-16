@@ -37,6 +37,15 @@ internal static class Program
     private static DateTime? _netgsmLastEventAt;
 
     /// <summary>
+    /// Last NetGSM state we surfaced to the user (tray balloon). Lets us
+    /// fire the "Yanlış kullanıcı adı veya parola" balloon ONCE per state
+    /// transition into AuthRejected — without this, the AuthRejected retry
+    /// cycle (300s) would balloon the secretary every 5 minutes for as long
+    /// as credentials stay wrong.
+    /// </summary>
+    private static NetgsmConnectionState? _lastNetgsmStateNotified;
+
+    /// <summary>
     /// Premium status window — opens on tray double-click and stays hidden
     /// otherwise. Created once so we can keep the live call feed across
     /// closes without losing history.
@@ -45,10 +54,48 @@ internal static class Program
     private static bool _backendReachable = true;
     private static int _consecutive401;
 
+    /// <summary>
+    /// Heartbeat tick counter. Used to throttle non-critical periodic work
+    /// (auto-update check) so it runs every N pings instead of on every one.
+    /// </summary>
+    private static int _heartbeatTicks;
+
+    /// <summary>
+    /// Latest update info from <c>/caller-id/latest-version</c>, populated by
+    /// the heartbeat timer. Drives the "Güncelleştirmeyi indir" tray menu item
+    /// and the one-time update balloon notification.
+    /// </summary>
+    private static UpdateInfo? _latestUpdate;
+    private static bool _updateBalloonShown;
+    private static ToolStripMenuItem? _updateMenuItem;
+
+    /// <summary>
+    /// Reusable callback delegates so Repair() / ApplyHiddenActivate() can
+    /// rebind the StatusForm Activated event without leaking handler
+    /// references across re-creations. Hooked once in Main().
+    /// </summary>
+    private static bool _cidHookCompleted;
+    private static bool _hiddenActivateApplied;
+
     private static readonly string LogDir = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
         "ProTakipCallerBridge");
     private static readonly string LogPath = Path.Combine(LogDir, "bridge.log");
+
+    /// <summary>
+    /// Log rotation thresholds. 5 MB per file × 5 backups = 25 MB max history.
+    /// Adequate for ~30 days of typical bridge traffic at one log line per
+    /// NetGSM frame + heartbeat noise.
+    /// </summary>
+    private const long MaxLogSizeBytes = 5 * 1024 * 1024;
+    private const int MaxLogBackups = 5;
+
+    /// <summary>
+    /// Cheap counter to avoid calling <see cref="FileInfo.Length"/> on every
+    /// log line. We check size every 100 lines — at ~150 bytes/line that's
+    /// ~15 KB between checks, well below the 5 MB rotation threshold.
+    /// </summary>
+    private static int _logLinesSinceRotateCheck;
 
     /// <summary>
     /// Bridge version string shown in the log header, StatusForm subtitle,
@@ -127,6 +174,17 @@ internal static class Program
             SynchronizationContext.SetSynchronizationContext(_ui);
             Log($"Config loaded — isPaired={_cfg.IsPaired} company={_cfg.CompanyName ?? "-"}");
 
+            // SELF-HEAL — primary config has no token but a backup exists
+            // (most common cause: previous bridge built with the Repair()
+            // Clear bug overwrote a healthy pair; #1 in the audit). Try the
+            // backup token against /caller-id/ping; if the server still
+            // recognises it, promote the backup to primary and skip the
+            // pair dialog entirely. No user intervention required.
+            if (!_cfg.IsPaired)
+            {
+                TrySelfHealFromBackup();
+            }
+
             // Startup registration — auto-run on Windows login, per-user so
             // no admin prompt. Idempotent.
             RegisterAutoStart();
@@ -177,16 +235,22 @@ internal static class Program
             // form henüz visible değil → DLL CallerID event post'u
             // düşüyor olabilir. Activated'a taşıyoruz + ilk fire'da
             // tekrar hook etmeyecek şekilde tek seferlik.
-            bool hooked = false;
+            //
+            // After the hook succeeds we IMMEDIATELY hide the form so the
+            // secretary doesn't see it pop up on every boot (#4 in the
+            // audit). The form starts minimized + ShowInTaskbar=false, gets
+            // activated once for the hook, then disappears. Tray double-
+            // click brings it back via ShowStatusWindow().
             _statusForm.Activated += (_, _) =>
             {
-                if (hooked) return;
-                hooked = true;
+                if (_cidHookCompleted) return;
+
                 try
                 {
                     var callerIdDelegate = new CidInterop.CallerIdCallback(OnCallerId);
                     var signalDelegate = new CidInterop.SignalCallback(OnSignal);
                     CidInterop.SetEvents(callerIdDelegate, signalDelegate);
+                    _cidHookCompleted = true;
                     Log("cid.dll SetEvents hooked (inside Activated event — Delphi vendor pattern)");
                 }
                 catch (Exception ex)
@@ -197,17 +261,42 @@ internal static class Program
                         "\n\nBridge tray'de kalacak ama telefon çağrılarını algılayamaz.",
                         "ProTakip Caller Id",
                         MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    _cidHookCompleted = true; // don't retry on every activation
+                }
+
+                // Drop the form back to tray. BeginInvoke so we don't fight
+                // with the in-flight Activated handler — Hide() while inside
+                // the event sometimes leaves WinForms in a weird focus state.
+                if (!_hiddenActivateApplied)
+                {
+                    _hiddenActivateApplied = true;
+                    _statusForm!.BeginInvoke(new Action(() =>
+                    {
+                        try
+                        {
+                            _statusForm!.Hide();
+                            // Restore for the NEXT show (via tray) — taskbar
+                            // entry should appear when the user actively opens
+                            // the window, just not at boot.
+                            _statusForm.WindowState = FormWindowState.Normal;
+                            _statusForm.ShowInTaskbar = true;
+                        }
+                        catch (Exception ex)
+                        {
+                            Log("StatusForm hide-after-hook failed: " + ex.Message);
+                        }
+                    }));
                 }
             };
 
-            // StatusForm açık ve görünür kalıyor — vendor Form1 de böyle.
-            // Hidden form'a DLL'in post ettiği mesajlar bazen drop olabiliyor
-            // (belki DefWindowProc'a ulaşmıyor), bu teoriyi elimine etmek
-            // için form startup'ta normal şekilde açık. Kullanıcı rahatsız
-            // olursa X tuşuyla kapatır → zaten `FormClosing` handler'ımız
-            // bunu tray'e minimize ediyor (gerçek close yok).
-            _statusForm.WindowState = FormWindowState.Normal;
-            _statusForm.ShowInTaskbar = true;
+            // Boot in hidden mode. Application.Run(_statusForm) calls Show()
+            // internally, which fires Activated (needed for the cid.dll
+            // hook above). With Minimized + ShowInTaskbar=false the user
+            // sees nothing — no popup, no taskbar icon, just the tray. The
+            // Activated handler then Hide()'s the form so subsequent tray
+            // clicks open it cleanly.
+            _statusForm.WindowState = FormWindowState.Minimized;
+            _statusForm.ShowInTaskbar = false;
 
             // If we aren't paired yet, block on the pair dialog before
             // starting the message loop. Pair finishes → Application.Run
@@ -226,6 +315,19 @@ internal static class Program
             // freshly-paired bridge comes online quickly.
             _heartbeatTimer = new System.Threading.Timer(async _ =>
             {
+                _heartbeatTicks++;
+
+                // Auto-update check — every 30 ticks (≈30 min at 60s heartbeat).
+                // Runs even when unpaired so brand-new installations get the
+                // latest-version balloon before the user even pairs. 404s are
+                // silently swallowed by CheckLatestVersionAsync; nothing
+                // happens if the backend hasn't shipped the endpoint yet.
+                if (_heartbeatTicks % 30 == 1)
+                {
+                    try { await CheckForUpdatesAsync(); }
+                    catch (Exception ex) { Log("Update check threw: " + ex.Message); }
+                }
+
                 if (!_cfg.IsPaired) return;
                 bool pingOk = false;
                 string? pingDetail = null;
@@ -322,6 +424,21 @@ internal static class Program
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("Yeniden eşleştir", null, (_, __) => Repair());
         menu.Items.Add("Log dosyası", null, (_, __) => OpenLog());
+
+        // Update item — hidden by default; CheckForUpdatesAsync flips
+        // Visible=true the moment a newer version is announced. Keeping
+        // it in the menu (vs. injecting on demand) avoids tray menu
+        // re-build races and gives the user a stable place to find the
+        // download even after they dismiss the balloon.
+        _updateMenuItem = new ToolStripMenuItem("Güncelleştirmeyi indir",
+            null, (_, __) => OpenUpdateUrl())
+        {
+            Visible = false,
+            Font = new Font("Segoe UI", 9.5f, FontStyle.Bold),
+            ForeColor = Color.FromArgb(37, 99, 235), // blue-600
+        };
+        menu.Items.Add(_updateMenuItem);
+
         menu.Items.Add("Çıkış", null, (_, __) => Exit());
         return menu;
     }
@@ -408,6 +525,11 @@ internal static class Program
         if (_statusForm == null) return;
         try
         {
+            // Restore taskbar visibility on user-initiated open. Boot path
+            // explicitly hides it (ShowInTaskbar=false in Main + hide-after-
+            // hook in Activated); without this re-set the form would open
+            // without a taskbar entry every subsequent time.
+            _statusForm.ShowInTaskbar = true;
             if (!_statusForm.Visible) _statusForm.Show();
             if (_statusForm.WindowState == FormWindowState.Minimized)
                 _statusForm.WindowState = FormWindowState.Normal;
@@ -450,9 +572,28 @@ internal static class Program
 
     private static void Repair()
     {
-        _cfg.Clear();
-        _statusForm?.UpdateCompany(null);
-        UpdateTrayState();
+        // CONFIRM — Berkay Halı Yıkama vakası: önceki sürüm tek tıkla
+        // pair'i siliyordu (Repair → _cfg.Clear → kullanıcı dialog'u
+        // kapatınca pair gitti, 3 saat çağrı kaybı). Yanlışlıkla tıklama
+        // veri kaybı yapmasın. Default button = No → ENTER yanlış
+        // bastığında da sorun olmaz.
+        if (_cfg.IsPaired)
+        {
+            var result = MessageBox.Show(
+                $"\"{_cfg.CompanyName ?? "Mevcut hesap"}\" ile eşleşme kaldırılacak " +
+                "ve yeni 6 haneli eşleşme kodu girmeniz istenecek.\n\n" +
+                "Yeniden eşleştirmek istediğinizden emin misiniz?",
+                "ProTakip Caller Id — Yeniden eşleştir",
+                MessageBoxButtons.YesNo, MessageBoxIcon.Question,
+                MessageBoxDefaultButton.Button2);
+            if (result != DialogResult.Yes) return;
+        }
+
+        // CRITICAL — NO _cfg.Clear() HERE. PairDialog.DoPairAsync zaten
+        // sadece BAŞARILI pair'de _cfg.DeviceToken'ı set ediyor + Save().
+        // Kullanıcı dialog'u kapatırsa eski pair AYNEN KALSIN — Berkay
+        // vakasının kök sebebi bu çağrıydı. Backup file da el değmemiş
+        // şekilde duruyor (BridgeConfig.Save IsPaired'ken yazıyor).
         ShowPairDialog();
         _statusForm?.UpdateCompany(_cfg.CompanyName);
         UpdateTrayState();
@@ -640,14 +781,78 @@ internal static class Program
             version: cfg.Version ?? string.Empty,
             onIncomingNumber: OnNetgsmIncomingAsync,
             log: Log);
-        _netgsm.Start();
+
+        // Subscribe BEFORE Start() — RunAsync raises Connecting at the very
+        // top of its loop, and a missed first transition leaves the status
+        // card showing the previous run's state (or "Yapılandırılmadı").
+        _netgsm.StateChanged += OnNetgsmStateChanged;
+
         _netgsmVersion = cfg.Version;
         _netgsmUsername = cfg.Username;
         _netgsmLastEventAt = null;
+        // Fresh client → fresh notification state. Otherwise a credential
+        // bump (server-side fix) wouldn't re-balloon if the new credentials
+        // are ALSO wrong, because the previous AuthRejected balloon flag
+        // would suppress it.
+        _lastNetgsmStateNotified = null;
+
+        _netgsm.Start();
         Log($"Netgsm subscriber started — version={cfg.Version}");
+
+        // Show "Bağlanıyor…" immediately so the secretary doesn't see a
+        // stale card while the TCP dial is in flight. The client will
+        // publish Connected once the login succeeds, AuthRejected if
+        // credentials are wrong, or Disconnected on transient failures.
+        _ui?.Post(_ => _statusForm?.UpdateNetgsm(NetgsmState.Connecting, cfg.Username), null);
+    }
+
+    /// <summary>
+    /// Bridges <see cref="NetgsmTcpClient.StateChanged"/> events to the
+    /// status form + tray. Always called on the client's worker thread —
+    /// we marshal to the UI thread here so neither the client nor the
+    /// status form has to know about WinForms threading rules.
+    /// </summary>
+    private static void OnNetgsmStateChanged(NetgsmConnectionState state, string? detail)
+    {
         _ui?.Post(_ =>
         {
-            _statusForm?.UpdateNetgsm(NetgsmState.Connected, cfg.Username, _netgsmLastEventAt);
+            var stateTransitioned = _lastNetgsmStateNotified != state;
+            _lastNetgsmStateNotified = state;
+
+            switch (state)
+            {
+                case NetgsmConnectionState.Connecting:
+                    _statusForm?.UpdateNetgsm(NetgsmState.Connecting, _netgsmUsername);
+                    break;
+
+                case NetgsmConnectionState.Connected:
+                    _statusForm?.UpdateNetgsm(NetgsmState.Connected, _netgsmUsername, _netgsmLastEventAt);
+                    break;
+
+                case NetgsmConnectionState.AuthRejected:
+                    _statusForm?.UpdateNetgsm(NetgsmState.Error, _netgsmUsername, null,
+                        detail ?? "Yanlış kullanıcı adı veya parola");
+
+                    // Balloon ONLY on the first transition into AuthRejected.
+                    // The 300s retry would otherwise nag the secretary every
+                    // 5 minutes for as long as the credentials stay wrong.
+                    // A fresh credential change (ReconcileNetgsmAsync ->
+                    // new client) resets _lastNetgsmStateNotified so the
+                    // next failure WILL balloon again.
+                    if (stateTransitioned)
+                    {
+                        _tray?.ShowBalloonTip(8000,
+                            "NetGSM kullanıcı adı veya parola hatalı",
+                            "Yönetici Paneli → Caller ID → Sanal Santral'da bilgileri güncelleyin.",
+                            ToolTipIcon.Warning);
+                    }
+                    break;
+
+                case NetgsmConnectionState.Disconnected:
+                    _statusForm?.UpdateNetgsm(NetgsmState.Error, _netgsmUsername, _netgsmLastEventAt,
+                        detail ?? "Bağlantı kesildi, yeniden deneniyor");
+                    break;
+            }
         }, null);
     }
 
@@ -754,6 +959,128 @@ internal static class Program
         }
     }
 
+    // ── Self-heal ───────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Attempts to restore pair state from <c>config.backup.json</c> when the
+    /// primary config has no token. The backup is only trusted after a live
+    /// <c>/caller-id/ping</c> succeeds — a stale backup (server-side pair
+    /// deleted, account removed, token revoked) would otherwise trick the
+    /// bridge into thinking it's paired while every ingest 401s.
+    ///
+    /// Called from <see cref="Main"/> right after loading config. Synchronous
+    /// (uses <c>.GetAwaiter().GetResult()</c>) because at this point the UI
+    /// hasn't started — there's no thread to deadlock with, and we want the
+    /// restore decision settled before tray icon / pair dialog logic runs.
+    /// </summary>
+    private static void TrySelfHealFromBackup()
+    {
+        BridgeConfig? backup;
+        try { backup = BridgeConfig.LoadBackup(); }
+        catch (Exception ex) { Log("Self-heal: backup load threw — " + ex.Message); return; }
+
+        if (backup == null || !backup.IsPaired)
+        {
+            Log("Self-heal: no usable backup");
+            return;
+        }
+
+        Log($"Self-heal: backup found (company={backup.CompanyName}), validating with server…");
+
+        // Probe the server with the backup token via a throwaway ApiClient.
+        // We don't reuse _api because it's bound to _cfg (no token yet).
+        var probe = new ApiClient(backup);
+        bool serverAccepts;
+        try
+        {
+            var (ok, detail) = probe.PingAsync().GetAwaiter().GetResult();
+            serverAccepts = ok;
+            if (!ok) Log("Self-heal: server rejected backup token — " + detail);
+        }
+        catch (Exception ex)
+        {
+            // Network unreachable etc. — leave bridge unpaired; user can
+            // retry next launch when connectivity returns, backup file is
+            // untouched.
+            Log("Self-heal: ping threw — " + ex.Message);
+            return;
+        }
+
+        if (!serverAccepts) return;
+
+        // Server still recognises the token — promote backup to primary.
+        // AdoptFrom calls Save(), which atomically rewrites both files.
+        _cfg.AdoptFrom(backup);
+        Log($"Self-heal: pair otomatik geri yüklendi (company={_cfg.CompanyName})");
+    }
+
+    // ── Auto-update ────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Polls <c>/caller-id/latest-version</c> and surfaces a tray balloon +
+    /// menu item when a newer build is available. Comparison is via
+    /// <see cref="Version"/> parsing (semantic-ish four-part); a malformed
+    /// or older returned version is ignored. The balloon fires once per
+    /// bridge process lifetime; the menu item stays visible until restart
+    /// so the user can find the download even after dismissing the popup.
+    /// </summary>
+    private static async Task CheckForUpdatesAsync()
+    {
+        var latest = await _api.CheckLatestVersionAsync();
+        if (latest == null || string.IsNullOrEmpty(latest.Version)) return;
+        if (!IsNewerVersion(latest.Version, AppVersion)) return;
+
+        _latestUpdate = latest;
+        Log($"Update available: v{latest.Version} (current v{AppVersion})");
+
+        _ui?.Post(_ =>
+        {
+            if (_updateMenuItem != null)
+            {
+                _updateMenuItem.Text = $"Güncelleştirmeyi indir (v{latest.Version})";
+                _updateMenuItem.Visible = true;
+            }
+
+            if (!_updateBalloonShown)
+            {
+                _updateBalloonShown = true;
+                _tray?.ShowBalloonTip(10000,
+                    $"Yeni güncelleme: v{latest.Version}",
+                    "Tray simgesine sağ tıklayıp 'Güncelleştirmeyi indir' seçin.",
+                    ToolTipIcon.Info);
+            }
+        }, null);
+    }
+
+    private static bool IsNewerVersion(string? candidate, string? current)
+    {
+        if (string.IsNullOrEmpty(candidate) || string.IsNullOrEmpty(current)) return false;
+        if (!Version.TryParse(candidate, out var c)) return false;
+        if (!Version.TryParse(current, out var cur)) return false;
+        return c > cur;
+    }
+
+    private static void OpenUpdateUrl()
+    {
+        var url = _latestUpdate?.DownloadUrl;
+        if (string.IsNullOrEmpty(url))
+        {
+            // Fallback — user clicked the menu item but somehow we lost
+            // the download URL. Send them to the web panel where the
+            // Caller ID popup always has the latest link.
+            url = "https://app.protakip.com";
+        }
+        try
+        {
+            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = url,
+                UseShellExecute = true,
+            });
+        }
+        catch (Exception ex) { Log("OpenUpdateUrl failed: " + ex.Message); }
+    }
+
     // ── Logging ─────────────────────────────────────────────────────────
 
     private static readonly object _logLock = new();
@@ -766,8 +1093,57 @@ internal static class Program
             {
                 File.AppendAllText(LogPath,
                     $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] {msg}\n");
+
+                // Cheap throttle — FileInfo.Length is fast but we don't
+                // want it on every line. Check once every 100 writes;
+                // at ~150 bytes/line that's a 15 KB window, far below
+                // the 5 MB rotation threshold.
+                _logLinesSinceRotateCheck++;
+                if (_logLinesSinceRotateCheck >= 100)
+                {
+                    _logLinesSinceRotateCheck = 0;
+                    try
+                    {
+                        var fi = new FileInfo(LogPath);
+                        if (fi.Length > MaxLogSizeBytes) RotateLogs();
+                    }
+                    catch { /* fs glitch — let it grow, retry next check */ }
+                }
             }
         }
         catch { /* logging failures are non-fatal */ }
+    }
+
+    /// <summary>
+    /// Rotates <c>bridge.log</c> when it exceeds <see cref="MaxLogSizeBytes"/>.
+    /// Shifts <c>.4 → .5</c>, <c>.3 → .4</c>, … <c>bridge.log → bridge.log.1</c>;
+    /// the oldest (<c>.5</c>) is discarded. Best-effort: file locks from a
+    /// concurrent reader (the user has the log open in Notepad) just skip
+    /// the rotation this round.
+    /// </summary>
+    private static void RotateLogs()
+    {
+        // Shift suffixed backups outward — .4→.5, .3→.4, .2→.3, .1→.2.
+        for (int i = MaxLogBackups - 1; i >= 1; i--)
+        {
+            var src = $"{LogPath}.{i}";
+            var dst = $"{LogPath}.{i + 1}";
+            if (!File.Exists(src)) continue;
+            try
+            {
+                if (File.Exists(dst)) File.Delete(dst);
+                File.Move(src, dst);
+            }
+            catch { /* one busy file shouldn't abort the whole rotation */ }
+        }
+
+        // Active log → .1
+        try
+        {
+            var first = $"{LogPath}.1";
+            if (File.Exists(first)) File.Delete(first);
+            File.Move(LogPath, first);
+        }
+        catch { /* if the active log is locked we'll just keep appending */ }
     }
 }
