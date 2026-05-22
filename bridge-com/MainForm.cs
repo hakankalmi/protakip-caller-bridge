@@ -34,7 +34,9 @@ namespace ProTakipCallerBridgeCom
     /// </summary>
     public class MainForm : Form
     {
-        private readonly Axcidv5callerid.AxCIDv5 _cid;
+        // ActiveX yalnızca "com" (CID v5/v6) modunda oluşturulur — "cid"
+        // (eski cihaz) modunda null kalır.
+        private Axcidv5callerid.AxCIDv5 _cid;
         private readonly ListBox _logList;
         private readonly Label _statusLabel;
         private readonly Label _deviceLabel;
@@ -44,6 +46,15 @@ namespace ProTakipCallerBridgeCom
         private bool _reallyExit;
         private string _apiBase = "https://api.protakip.com/api";
         private string _deviceToken = string.Empty;
+
+        // Cihaz türü: "com" = CID v5/v6 (ActiveX COM), "cid" = eski C812A/C814A
+        // (cidshow cid.dll). Config'e kaydedilir, açılışta ilgili dinleyici
+        // başlatılır. Tür değişince temiz yeniden başlatma yapılır.
+        private string _deviceMode = "com";
+        private RadioButton _rbCom;
+        private RadioButton _rbCid;
+        private string _lastCidModel = string.Empty;
+        private string _lastCidSerial = string.Empty;
 
         // NetGSM TCP subscriber state. Pair sonrası /caller-id/pbx-config
         // çekilir, enabled + provider=netgsm ise socket açılır. Her ping'te
@@ -58,6 +69,11 @@ namespace ProTakipCallerBridgeCom
         private static readonly string ConfigPath = Path.Combine(ConfigDir, "config.ini");
         private static readonly string LogPath = Path.Combine(ConfigDir, "bridge.log");
 
+        // CI build'i 1.0.0.<run_number> ile damgalar; form başlığında + log'da
+        // gösterilir ki Hakan hangi build'in çalıştığını teyit edebilsin.
+        private static string AppVersion =>
+            System.Reflection.Assembly.GetExecutingAssembly().GetName().Version?.ToString() ?? "dev";
+
         public MainForm()
         {
             Program.LogLine("MainForm ctor: başladı");
@@ -65,61 +81,18 @@ namespace ProTakipCallerBridgeCom
 
             Directory.CreateDirectory(ConfigDir);
             LoadConfig();
-            Program.LogLine("MainForm ctor: config yüklendi (token len=" + _deviceToken.Length + ")");
+            Program.LogLine("MainForm ctor: config yüklendi (token len=" + _deviceToken.Length +
+                ", deviceMode=" + _deviceMode + ")");
 
-            Text = "ProTakip Caller Id — COM";
-            ClientSize = new Size(640, 460);
+            Text = "ProTakip Caller Id — COM  v" + AppVersion;
+            ClientSize = new Size(640, 520);
             StartPosition = FormStartPosition.CenterScreen;
             FormBorderStyle = FormBorderStyle.FixedDialog;
             MaximizeBox = false;
             Program.LogLine("MainForm ctor: form özellikleri set edildi");
 
-            // ActiveX control oluşturma en riskli kısım — cidv5callerid.dll
-            // sistemde regsvr32 ile kayıtlı değilse burada COMException
-            // fırlar. Hata logu ile kullanıcıya ne olduğunu göstermek için
-            // sarmaladık.
-            try
-            {
-                Program.LogLine("ActiveX control instantiating: Axcidv5callerid.AxCIDv5");
-                _cid = new Axcidv5callerid.AxCIDv5
-                {
-                    Visible = false,
-                    Location = new Point(0, 0),
-                    Size = new Size(10, 10),
-                };
-                Program.LogLine("ActiveX control instantiated OK");
-
-                ((ISupportInitialize)_cid).BeginInit();
-                Program.LogLine("ActiveX BeginInit OK");
-
-                Controls.Add(_cid);
-                Program.LogLine("ActiveX Controls.Add OK");
-
-                ((ISupportInitialize)_cid).EndInit();
-                Program.LogLine("ActiveX EndInit OK — COM object fully initialized");
-
-                _cid.OnCallerID += Cid_OnCallerID;
-                Program.LogLine("ActiveX OnCallerID event handler subscribed");
-
-                // NegroPos pattern (anaForm.cs:607-608) — Hide+Start yapmadan
-                // ActiveX cihazla iletişime geçmiyor, Command() boş dönüyor,
-                // OnCallerID event'i asla fire etmiyor. Start() kritik.
-                _cid.Hide();
-                Program.LogLine("ActiveX Hide() OK");
-                _cid.Start();
-                Program.LogLine("ActiveX Start() OK — cihaz dinleme başladı");
-            }
-            catch (Exception ex)
-            {
-                Program.LogLine("ActiveX init FAILED: " + ex.GetType().Name + ": " + ex.Message);
-                Program.LogLine(ex.ToString());
-                MessageBox.Show(
-                    "Caller ID COM bileşeni yüklenemedi:\n\n" + ex.Message +
-                    "\n\nMuhtemelen cidv5callerid.dll sistemde kayıtlı değil. NegroPos kurulu mu?",
-                    "ProTakip Caller Id — COM",
-                    MessageBoxButtons.OK, MessageBoxIcon.Error);
-                throw; // kritik hatayı Program.Main yakalayıp görsel gösterecek
-            }
+            // Cihaz dinleyicisi artık ctor'da eager başlatılmıyor — UI kurulduktan
+            // sonra seçili moda göre ActivateMode() içinde başlatılıyor (aşağıda).
 
             _statusLabel = new Label
             {
@@ -140,10 +113,45 @@ namespace ProTakipCallerBridgeCom
             };
             Controls.Add(_deviceLabel);
 
+            // ── Cihaz türü seçimi ───────────────────────────────────────
+            // İki USB caller-ID cihaz ailesi iki farklı sürücü yolu kullanır;
+            // tek sürücü ikisini de yakalayamaz:
+            //   • Yeni cihaz (CID v5/v6) → cidv5callerid ActiveX COM
+            //   • Eski cihaz (C812A/C814A) → cidshow cid.dll SetEvents
+            // Kullanıcı cihazına uyan türü seçer; seçim config'e kaydedilir.
+            // Tür değişince temiz yeniden başlatma yapılır (cid.dll unhook
+            // edilemiyor + iki sürücü aynı USB cihazını paylaşamıyor).
+            var modeGroup = new GroupBox
+            {
+                Text = "Cihaz Türü",
+                Location = new Point(12, 68),
+                Size = new Size(616, 64),
+                Font = new Font("Segoe UI", 9f),
+            };
+            _rbCom = new RadioButton
+            {
+                Text = "Yeni cihaz (CID v5 / v6)",
+                Location = new Point(16, 26),
+                Size = new Size(280, 24),
+                Checked = _deviceMode != "cid",
+            };
+            _rbCid = new RadioButton
+            {
+                Text = "Eski cihaz (C812A / C814A)",
+                Location = new Point(312, 26),
+                Size = new Size(280, 24),
+                Checked = _deviceMode == "cid",
+            };
+            _rbCom.CheckedChanged += (_, __) => OnDeviceModeChanged();
+            _rbCid.CheckedChanged += (_, __) => OnDeviceModeChanged();
+            modeGroup.Controls.Add(_rbCom);
+            modeGroup.Controls.Add(_rbCid);
+            Controls.Add(modeGroup);
+
             var tokenTitle = new Label
             {
                 Text = "Eşleşme kodu / Token (pair sonrası yapıştırın):",
-                Location = new Point(12, 70),
+                Location = new Point(12, 142),
                 Size = new Size(400, 20),
             };
             Controls.Add(tokenTitle);
@@ -151,7 +159,7 @@ namespace ProTakipCallerBridgeCom
             // PlaceholderText .NET 5+ — net40'ta yok.
             _tokenBox = new TextBox
             {
-                Location = new Point(12, 92),
+                Location = new Point(12, 164),
                 Size = new Size(520, 23),
                 Text = _deviceToken,
             };
@@ -160,7 +168,7 @@ namespace ProTakipCallerBridgeCom
             _saveTokenBtn = new Button
             {
                 Text = "Kaydet",
-                Location = new Point(540, 91),
+                Location = new Point(540, 163),
                 Size = new Size(88, 25),
             };
             _saveTokenBtn.Click += (_, __) => OnSaveClicked();
@@ -168,16 +176,19 @@ namespace ProTakipCallerBridgeCom
 
             _logList = new ListBox
             {
-                Location = new Point(12, 130),
-                Size = new Size(616, 320),
+                Location = new Point(12, 200),
+                Size = new Size(616, 308),
                 IntegralHeight = false,
                 Font = new Font("Consolas", 9f),
             };
             Controls.Add(_logList);
 
-            AppendLog("=== Bridge COM başladı — TargetFramework=net40");
+            AppendLog("=== Bridge COM başladı — v" + AppVersion + " (net48)");
             AppendLog("Config: " + ConfigPath);
             AppendLog("Log: " + LogPath);
+
+            // Seçili cihaz türünün dinleyicisini başlat.
+            ActivateMode();
 
             UpdateStatusLabel();
 
@@ -209,9 +220,181 @@ namespace ProTakipCallerBridgeCom
             FormClosing += (_, e) =>
             {
                 if (_reallyExit) return;
+                // Yalnızca kullanıcı X'e bastığında tray'e gizle. Application
+                // .Restart() / sistem kapanışı (ApplicationExitCall, WindowsShut
+                // Down) gerçek kapanmadır — engellersek yeniden başlatma takılır.
+                if (e.CloseReason != CloseReason.UserClosing) return;
                 e.Cancel = true;
                 HideToTray(showBalloon: true);
             };
+        }
+
+        // ── Cihaz türü modu ──────────────────────────────────────────────
+
+        /// <summary>Seçili moda göre ilgili dinleyiciyi başlatır.</summary>
+        private void ActivateMode()
+        {
+            if (_deviceMode == "cid") StartCidMode();
+            else StartComMode();
+        }
+
+        /// <summary>
+        /// Yeni cihaz (CID v5/v6) — cidv5callerid ActiveX COM kontrolü. DLL
+        /// regsvr32 ile kayıtlı değilse hata logu + uyarı, ama process'i
+        /// ÖLDÜRMEZ (eski cihaz kullanıcısı COM DLL'sine sahip olmayabilir,
+        /// türü değiştirip devam edebilmeli).
+        /// </summary>
+        private void StartComMode()
+        {
+            try
+            {
+                Program.LogLine("StartComMode: ActiveX instantiating Axcidv5callerid.AxCIDv5");
+                _cid = new Axcidv5callerid.AxCIDv5
+                {
+                    Visible = false,
+                    Location = new Point(0, 0),
+                    Size = new Size(10, 10),
+                };
+                ((ISupportInitialize)_cid).BeginInit();
+                Controls.Add(_cid);
+                ((ISupportInitialize)_cid).EndInit();
+                _cid.OnCallerID += Cid_OnCallerID;
+
+                // NegroPos pattern — Hide+Start yapmadan ActiveX cihazla
+                // iletişime geçmiyor, Command() boş dönüyor, OnCallerID asla
+                // fire etmiyor. Start() kritik.
+                _cid.Hide();
+                _cid.Start();
+                Program.LogLine("StartComMode: ActiveX Start() OK — CID v5/v6 dinleniyor");
+                AppendLog("Yeni cihaz (CID v5/v6) modu aktif — dinleniyor");
+            }
+            catch (Exception ex)
+            {
+                Program.LogLine("StartComMode FAILED: " + ex.GetType().Name + ": " + ex.Message);
+                AppendLog("✗ COM bileşeni yüklenemedi: " + ex.Message);
+                AppendLog("  → cidv5callerid.dll kayıtlı değil olabilir. register.bat'ı yönetici çalıştırın.");
+                MessageBox.Show(
+                    "Caller ID COM bileşeni yüklenemedi:\n\n" + ex.Message +
+                    "\n\ncidv5callerid.dll sistemde kayıtlı değil. register.bat'a sağ tık → " +
+                    "Yönetici olarak çalıştır.\n\nEski cihaz kullanıyorsanız 'Eski cihaz' türünü seçin.",
+                    "ProTakip Caller Id — COM",
+                    MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                _cid = null;
+            }
+        }
+
+        /// <summary>
+        /// Eski cihaz (C812A/C814A) — cidshow cid.dll SetEvents yolu. Native
+        /// callback'ler ayrı thread'den gelir; CallerID UI thread'e marshal
+        /// edilir, Signal yalnızca durum için saklanır.
+        /// </summary>
+        private void StartCidMode()
+        {
+            try
+            {
+                CidInterop.SetEvents(OnCid_CallerID, OnCid_Signal);
+                Program.LogLine("StartCidMode: cid.dll SetEvents hooked — C812A/C814A dinleniyor");
+                AppendLog("Eski cihaz (cid.dll) modu aktif — dinleniyor");
+            }
+            catch (Exception ex)
+            {
+                Program.LogLine("StartCidMode FAILED: " + ex.GetType().Name + ": " + ex.Message);
+                AppendLog("✗ cid.dll yüklenemedi: " + ex.Message);
+                MessageBox.Show(
+                    "Eski cihaz sürücüsü (cid.dll) yüklenemedi:\n\n" + ex.Message,
+                    "ProTakip Caller Id",
+                    MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
+        }
+
+        /// <summary>
+        /// Radyo değişince: yeni modu config'e yaz, uygulamayı temiz yeniden
+        /// başlat. cid.dll SetEvents geri alınamadığı ve iki sürücü aynı USB
+        /// cihazını paylaşamadığı için süreç içi geçiş güvenli değil.
+        /// </summary>
+        private void OnDeviceModeChanged()
+        {
+            var newMode = _rbCid.Checked ? "cid" : "com";
+            if (newMode == _deviceMode) return;
+
+            _deviceMode = newMode;
+            SaveConfig();
+            AppendLog("Cihaz türü değişti → " + (newMode == "cid"
+                ? "Eski cihaz (cid.dll)" : "Yeni cihaz (CID v5/v6)") +
+                " — temiz başlatma için yeniden başlatılıyor…");
+            Program.LogLine("Device mode changed to " + newMode + " — restarting");
+
+            // Kullanıcı değişimi görsün diye kısa gecikme, sonra temiz restart.
+            var t = new Timer { Interval = 700 };
+            t.Tick += (_, __) =>
+            {
+                t.Stop();
+                _reallyExit = true;                 // FormClosing tray'e gizlemesin
+                if (_tray != null) _tray.Visible = false;
+                Application.Restart();
+            };
+            t.Start();
+        }
+
+        // cidshow cid.dll native thread'inden gelir — UI thread'e marshal et.
+        private void OnCid_CallerID(string deviceSerial, string line, string phoneNumber,
+            string dateTime, string other)
+        {
+            Program.LogLine("[CID native OnCallerID] phone='" + phoneNumber + "' line='" + line +
+                "' serial='" + deviceSerial + "'");
+            try
+            {
+                if (IsHandleCreated)
+                    BeginInvoke((Action)(() => HandleIncomingCaller(phoneNumber, "cid")));
+                else
+                    HandleIncomingCaller(phoneNumber, "cid");
+            }
+            catch (Exception ex) { Program.LogLine("OnCid_CallerID marshal failed: " + ex.Message); }
+        }
+
+        // Signal her ~1 sn fire eder — log'u boğmamak için yalnızca cihaz
+        // kimliğini sakla, durum etiketini RefreshDeviceStatus günceller.
+        private void OnCid_Signal(string deviceModel, string deviceSerial,
+            int s1, int s2, int s3, int s4)
+        {
+            if (!string.IsNullOrEmpty(deviceSerial)) _lastCidSerial = deviceSerial;
+            if (!string.IsNullOrEmpty(deviceModel)) _lastCidModel = deviceModel;
+        }
+
+        /// <summary>
+        /// COM ve cid.dll yolları aynı normalize + /caller-id/ingest mantığını
+        /// paylaşır. Daima UI thread'inde çağrılmalı.
+        /// </summary>
+        private void HandleIncomingCaller(string rawPhone, string source)
+        {
+            var phone = (rawPhone ?? string.Empty).Trim();
+            if (string.IsNullOrWhiteSpace(phone))
+            {
+                AppendLog("[" + source + "] phoneNumber boş geldi, ingest atlanıyor");
+                return;
+            }
+
+            // NegroPos normalizasyonu — 09 prefix ve 12 haneli formu sadeleştir.
+            if (phone.Length >= 2 && phone.StartsWith("09")) phone = phone.Substring(2);
+            if (phone.Length == 12) phone = phone.Substring(1, 11);
+
+            AppendLog("[" + source + " OnCallerID] arayan='" + phone + "'");
+
+            if (string.IsNullOrEmpty(_deviceToken))
+            {
+                AppendLog("  → token yok, backend'e gönderilmedi");
+                return;
+            }
+
+            try
+            {
+                var ok = PostIngest(phone);
+                AppendLog(ok ? "  ✓ /caller-id/ingest başarılı" : "  ✗ /caller-id/ingest başarısız");
+            }
+            catch (Exception ex)
+            {
+                AppendLog("  ✗ ingest exception: " + ex.Message);
+            }
         }
 
         // Tray icon renk durumları — bridge genel sağlığına göre değişir.
@@ -452,7 +635,11 @@ namespace ProTakipCallerBridgeCom
 
         private string SafeGetSerial()
         {
-            try { return _cid?.Command("Serial") ?? string.Empty; }
+            try
+            {
+                if (_deviceMode == "cid") return _lastCidSerial ?? string.Empty;
+                return _cid != null ? (_cid.Command("Serial") ?? string.Empty) : string.Empty;
+            }
             catch { return string.Empty; }
         }
 
@@ -744,9 +931,25 @@ namespace ProTakipCallerBridgeCom
         {
             try
             {
+                if (_deviceMode == "cid")
+                {
+                    if (string.IsNullOrEmpty(_lastCidModel) && string.IsNullOrEmpty(_lastCidSerial))
+                        _deviceLabel.Text = "Cihaz (eski / cid.dll): sinyal bekleniyor…";
+                    else
+                        _deviceLabel.Text = "Cihaz (eski / cid.dll): model='" + _lastCidModel +
+                            "' serial='" + _lastCidSerial + "'";
+                    return;
+                }
+
+                if (_cid == null)
+                {
+                    _deviceLabel.Text = "Cihaz (yeni / COM): bileşen yüklenemedi — register.bat çalıştırın";
+                    return;
+                }
+
                 var model = _cid.Command("Devicemodel") ?? string.Empty;
                 var serial = _cid.Command("Serial") ?? string.Empty;
-                _deviceLabel.Text = $"Cihaz: model='{model}' serial='{serial}'";
+                _deviceLabel.Text = $"Cihaz (yeni / COM): model='{model}' serial='{serial}'";
             }
             catch (Exception ex)
             {
@@ -760,37 +963,11 @@ namespace ProTakipCallerBridgeCom
             try { phone = e.phoneNumber ?? string.Empty; }
             catch { /* some COM builds throw on accessor */ }
 
-            AppendLog($"[COM OnCallerID fire] phone='{phone}' line='{SafeProp(e, "line")}' dt='{SafeProp(e, "dateTime")}' deviceSerial='{SafeProp(e, "deviceSerial")}'");
+            Program.LogLine("[COM OnCallerID fire] phone='" + phone + "' line='" + SafeProp(e, "line") +
+                "' dt='" + SafeProp(e, "dateTime") + "' deviceSerial='" + SafeProp(e, "deviceSerial") + "'");
 
-            if (string.IsNullOrWhiteSpace(phone))
-            {
-                AppendLog("  → phoneNumber boş geldi, ingest atlanıyor");
-                return;
-            }
-
-            // Basic normalization mirroring NegroPos
-            if (phone.Length >= 2 && phone.StartsWith("09"))
-                phone = phone.Substring(2);
-            if (phone.Length == 12)
-                phone = phone.Substring(1, 11);
-
-            AppendLog($"  → normalized phone='{phone}'");
-
-            if (string.IsNullOrEmpty(_deviceToken))
-            {
-                AppendLog("  → token yok, backend'e gönderilmedi");
-                return;
-            }
-
-            try
-            {
-                var ok = PostIngest(phone);
-                AppendLog(ok ? "  ✓ /caller-id/ingest başarılı" : "  ✗ /caller-id/ingest başarısız");
-            }
-            catch (Exception ex)
-            {
-                AppendLog("  ✗ ingest exception: " + ex.Message);
-            }
+            // COM event'i UI thread'inde gelir — ortak ingest yoluna ver.
+            HandleIncomingCaller(phone, "com");
         }
 
         private static string SafeProp(object obj, string name)
@@ -858,6 +1035,8 @@ namespace ProTakipCallerBridgeCom
                     var val = line.Substring(eq + 1).Trim();
                     if (key == "deviceToken") _deviceToken = val;
                     else if (key == "apiBase") _apiBase = val;
+                    else if (key == "deviceMode")
+                        _deviceMode = (val == "cid") ? "cid" : "com";
                 }
             }
             catch { /* best-effort */ }
@@ -868,7 +1047,7 @@ namespace ProTakipCallerBridgeCom
             try
             {
                 File.WriteAllText(ConfigPath,
-                    $"deviceToken={_deviceToken}\r\napiBase={_apiBase}\r\n");
+                    $"deviceToken={_deviceToken}\r\napiBase={_apiBase}\r\ndeviceMode={_deviceMode}\r\n");
             }
             catch { /* best-effort */ }
         }

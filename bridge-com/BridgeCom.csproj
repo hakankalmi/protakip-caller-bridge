@@ -10,6 +10,12 @@
     <UseWindowsForms>true</UseWindowsForms>
     <RootNamespace>ProTakipCallerBridgeCom</RootNamespace>
     <AssemblyName>ProTakipCallerBridgeCom</AssemblyName>
+    <!-- CI (release.yml) build sırasında 1.0.0.<run_number> ile override
+         ediyor; lokal build'lerde bu varsayılan kullanılır. Form başlığında
+         + log'da gösteriliyor ki hangi build'in çalıştığı görülebilsin. -->
+    <Version>1.0.0</Version>
+    <AssemblyVersion>1.0.0.0</AssemblyVersion>
+    <FileVersion>1.0.0.0</FileVersion>
     <!-- Native cidv5callerid.dll 32-bit (vendor Test.exe da 32-bit).
          AnyCPU/64-bit process olunca Interop BadImageFormatException
          fırlatır. x86 zorunlu. -->
@@ -48,6 +54,14 @@
     </Content>
     <Content Include="lib\v5_2009.dll">
       <Link>v5_2009.dll</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <!-- Eski cihaz (C812A/C814A) için cidshow SDK cid.dll — 32-bit kopya.
+         CID v5/v6 cihazlarda CallerID fire etmiyor ama eski cihazlarda tek
+         çalışan yol bu. Kullanıcı ekrandan "Eski cihaz" türünü seçince
+         CidInterop.SetEvents bu DLL'i yükler. -->
+    <Content Include="..\cidshow_x86\cid.dll">
+      <Link>cid.dll</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
     <Content Include="register.bat">
