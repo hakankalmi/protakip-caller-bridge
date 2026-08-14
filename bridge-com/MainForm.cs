@@ -72,6 +72,20 @@ namespace ProTakipCallerBridgeCom
         private bool _comNoDeviceWarned;
         private string _warning;           // doluysa status etiketinde kırmızı gösterilir
 
+        // COM modunda cihaz canlılığının DOĞRU ölçüsü. Güven Halı'nın CID v6
+        // kutusunda Command("Devicemodel")/Command("Serial") BOŞ dönüyor ama
+        // OnCallerID sorunsuz fire ediyor (2026-05/06 bridge.log'da onlarca
+        // çağrı). Yani boş seri no = arıza DEĞİL. Cihazın orada olduğunu
+        // OnSignalA / OnCallerID kanıtlar; "cihaz görünmüyor" uyarısını buna
+        // bağlıyoruz, yoksa çalışan kuruluma yanlış alarm veriyoruz.
+        private bool _comDeviceProven;
+
+        // Eşleşme kaydı backend'de silinince köprü AYLARCA "Ping hatası: HTTP
+        // 401" yazıp sessizce çalışmaya devam ediyordu; ekranda hiçbir şey
+        // belli olmuyordu. Güven Halı'da 2026-06-01'den itibaren her çağrı
+        // yakalandı ama 401 ile reddedildi — kimse fark etmedi.
+        private bool _pairInvalid;
+
         // NetGSM TCP subscriber state. Pair sonrası /caller-id/pbx-config
         // çekilir, enabled + provider=netgsm ise socket açılır. Her ping'te
         // version alanı tekrar sorulur; değişmişse subscriber stop edilip
@@ -287,6 +301,9 @@ namespace ProTakipCallerBridgeCom
                 Controls.Add(_cid);
                 ((ISupportInitialize)_cid).EndInit();
                 _cid.OnCallerID += Cid_OnCallerID;
+                // Cihaz canlılık sinyali — Command() boş dönen cihazlarda
+                // "kutu takılı mı" sorusunun tek güvenilir cevabı bu.
+                _cid.OnSignalA += Cid_OnSignalA;
 
                 // NegroPos pattern — Hide+Start yapmadan ActiveX cihazla
                 // iletişime geçmiyor, Command() boş dönüyor, OnCallerID asla
@@ -976,6 +993,12 @@ namespace ProTakipCallerBridgeCom
                 {
                     _isConnected = (int)resp.StatusCode >= 200 && (int)resp.StatusCode < 300;
                 }
+                if (_pairInvalid)
+                {
+                    _pairInvalid = false;
+                    _warning = null;
+                    AppendLog("✓ Eşleşme yeniden geçerli — çağrılar gönderiliyor.");
+                }
                 UpdateStatusLabel();
                 UpdateTrayIcon();
 
@@ -990,6 +1013,7 @@ namespace ProTakipCallerBridgeCom
                 _isConnected = false;
                 var http = webEx.Response as HttpWebResponse;
                 AppendLog("Ping hatası: HTTP " + (http != null ? ((int)http.StatusCode).ToString() : "no-response"));
+                if (http != null && (int)http.StatusCode == 401) HandlePairInvalid();
                 UpdateStatusLabel();
                 UpdateTrayIcon();
             }
@@ -1185,37 +1209,41 @@ namespace ProTakipCallerBridgeCom
 
                 var model = _cid.Command("Devicemodel") ?? string.Empty;
                 var serial = _cid.Command("Serial") ?? string.Empty;
-                _deviceLabel.Text = $"Cihaz (yeni / COM): model='{model}' serial='{serial}'";
+                var hasInfo = !string.IsNullOrWhiteSpace(model) || !string.IsNullOrWhiteSpace(serial);
 
-                if (string.IsNullOrWhiteSpace(model) && string.IsNullOrWhiteSpace(serial))
+                if (hasInfo)
                 {
-                    // Cihaz 15 sn boyunca hiç görünmedi. En sık iki sebep:
+                    _deviceLabel.Text = $"Cihaz (yeni / COM): model='{model}' serial='{serial}'";
+                    WarnIfMultipleDevices(serial);
+                }
+                else if (_comDeviceProven)
+                {
+                    // BOŞ SERİ NO ARIZA DEĞİL. Bazı CID v6 kutuları Command()
+                    // sorgusuna boş dönüyor ama çağrıları sorunsuz veriyor.
+                    // Kullanıcı buradaki boşluğu arıza sanıp cihaz türünü
+                    // değiştirdiğinde ÇALIŞAN kurulumu bozuyor — o yüzden
+                    // açıkça "sorun değil" yazıyoruz.
+                    _deviceLabel.Text = "Cihaz (yeni / COM): bağlı — sinyal alınıyor " +
+                                        "(bu modelde model/seri bilgisi boş döner, sorun değil)";
+                }
+                else
+                {
+                    _deviceLabel.Text = "Cihaz (yeni / COM): sinyal bekleniyor…";
+                    // Cihaz 30 sn boyunca ne bilgi ne sinyal verdi. En sık iki sebep:
                     // (1) cihazı BAŞKA bir program tutuyor — sürücü aynı anda
                     //     tek uygulamaya bağlanıyor (NegroPos, "Cihaz Test",
                     //     cidshow açıksa köprüye sıra gelmez),
                     // (2) cihaz gerçekten eski aile (C812A/C814A).
-                    if (++_comNoDeviceTicks >= 15 && !_comNoDeviceWarned)
+                    if (++_comNoDeviceTicks >= 30 && !_comNoDeviceWarned)
                     {
                         _comNoDeviceWarned = true;
-                        SetWarning("⚠ Cihaz görünmüyor — başka program tutuyor olabilir");
-                        AppendLog("⚠ 15 sn'dir cihaz görünmüyor.");
+                        SetWarning("⚠ Cihazdan sinyal yok — başka program tutuyor olabilir");
+                        AppendLog("⚠ 30 sn'dir cihazdan sinyal gelmedi.");
                         AppendLog("   1) Cihazı tutan diğer programları KAPATIN " +
                                   "(NegroPos, 'Cihaz Test', cidshow) — cihaz aynı anda tek programa bağlanır.");
                         AppendLog("   2) USB kablosunu çıkarıp başka porta takın.");
                         AppendLog("   3) Cihazınız eski model (C812A/C814A) ise cihaz türünü değiştirin.");
                     }
-                }
-                else
-                {
-                    _comNoDeviceTicks = 0;
-                    if (_comNoDeviceWarned)
-                    {
-                        _comNoDeviceWarned = false;
-                        _warning = null;
-                        AppendLog("✓ Cihaz göründü: model='" + model + "' serial='" + serial + "'");
-                        UpdateStatusLabel();
-                    }
-                    WarnIfMultipleDevices(serial);
                 }
             }
             catch (Exception ex)
@@ -1233,8 +1261,30 @@ namespace ProTakipCallerBridgeCom
             Program.LogLine("[COM OnCallerID fire] phone='" + phone + "' line='" + SafeProp(e, "line") +
                 "' dt='" + SafeProp(e, "dateTime") + "' deviceSerial='" + SafeProp(e, "deviceSerial") + "'");
 
+            // Çağrı geldiyse cihaz kesinlikle oradadır.
+            MarkComDeviceProven();
+
             // COM event'i UI thread'inde gelir — ortak ingest yoluna ver.
             HandleIncomingCaller(phone, "com");
+        }
+
+        private void Cid_OnSignalA(object sender, Axcidv5callerid.ICIDv5Events_OnSignalAEvent e)
+        {
+            MarkComDeviceProven();
+        }
+
+        private void MarkComDeviceProven()
+        {
+            if (_comDeviceProven) return;
+            _comDeviceProven = true;
+            _comNoDeviceTicks = 0;
+            Program.LogLine("COM: cihaz canlılığı doğrulandı (OnSignalA/OnCallerID)");
+            if (_comNoDeviceWarned)
+            {
+                _comNoDeviceWarned = false;
+                _warning = null;
+                UpdateStatusLabel();
+            }
         }
 
         private static string SafeProp(object obj, string name)
@@ -1269,8 +1319,28 @@ namespace ProTakipCallerBridgeCom
             {
                 var http = webEx.Response as HttpWebResponse;
                 AppendLog("    HTTP status: " + (http != null ? ((int)http.StatusCode).ToString() : "no-response"));
+                if (http != null && (int)http.StatusCode == 401) HandlePairInvalid();
                 return false;
             }
+        }
+
+        /// <summary>
+        /// 401 = token backend'de artık çözülmüyor (eşleşme kaydı silinmiş,
+        /// başka cihaza geçilmiş veya token değişmiş). Bu, köprünün sessizce
+        /// ölmesinin 1 numaralı sebebi: cihaz çağrıları yakalamaya devam eder,
+        /// hepsi reddedilir, ekranda hiçbir şey belli olmaz. Güven Halı'da bu
+        /// durum 2026-06-01'den bu yana fark edilmeden sürdü — o yüzden artık
+        /// kırmızı, ne yapılacağını söyleyen bir uyarıya dönüşüyor.
+        /// </summary>
+        private void HandlePairInvalid()
+        {
+            if (_pairInvalid) return;
+            _pairInvalid = true;
+            SetWarning("⚠ EŞLEŞME GEÇERSİZ — çağrılar iletilemiyor, yeniden eşleştirin");
+            AppendLog("⚠ Sunucu token'ı kabul etmiyor (401). Cihaz çağrıları yakalıyor ama HİÇBİRİ iletilmiyor.");
+            AppendLog("   Çözüm: ProTakip'te Caller ID ekranından yeni eşleşme kodu alın," +
+                      " yukarıdaki kutuya yapıştırıp Kaydet'e basın.");
+            UpdateTrayIcon();
         }
 
         private static string JsonEscape(string s) =>
