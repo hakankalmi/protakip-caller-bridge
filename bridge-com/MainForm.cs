@@ -56,6 +56,20 @@ namespace ProTakipCallerBridgeCom
         private string _lastCidModel = string.Empty;
         private string _lastCidSerial = string.Empty;
 
+        // ── Yanlış cihaz türü / cihazı başkası tutuyor teşhisi ───────────
+        // Ankara Güven Halı Yıkama vakası (14.08.2026): CID v6 cihaz "Eski
+        // cihaz" modunda seçiliydi. cid.dll o cihazda Signal fire ediyor
+        // (model + seri no ekranda GÖRÜNÜYOR, "Dinleniyor (Bağlı)" yazıyor)
+        // ama CallerID ASLA fire etmiyor → arayan yakalanmıyor. Ekran
+        // tamamen sağlıklı göründüğü için teşhis saatler sürdü. Artık köprü
+        // bunu kendi tespit edip bir kez otomatik doğru moda geçiyor.
+        private bool _autoSwitchedToCom;   // config'e yazılır — ping-pong restart engeli
+        private bool _wrongModeWarned;
+        private bool _multiDeviceWarned;
+        private int _comNoDeviceTicks;     // COM modunda cihazın görünmediği saniye
+        private bool _comNoDeviceWarned;
+        private string _warning;           // doluysa status etiketinde kırmızı gösterilir
+
         // NetGSM TCP subscriber state. Pair sonrası /caller-id/pbx-config
         // çekilir, enabled + provider=netgsm ise socket açılır. Her ping'te
         // version alanı tekrar sorulur; değişmişse subscriber stop edilip
@@ -359,6 +373,89 @@ namespace ProTakipCallerBridgeCom
         {
             if (!string.IsNullOrEmpty(deviceSerial)) _lastCidSerial = deviceSerial;
             if (!string.IsNullOrEmpty(deviceModel)) _lastCidModel = deviceModel;
+
+            // Eski cihaz modundayız ama cihaz YENİ nesil (CID v5/v6) diyor →
+            // bu yolda arayan numara asla gelmez. Native thread'den geliyoruz,
+            // UI thread'e marshal et.
+            if (_deviceMode == "cid" && !_wrongModeWarned && IsNewDeviceModel(deviceModel))
+            {
+                _wrongModeWarned = true;
+                try
+                {
+                    if (IsHandleCreated) BeginInvoke((Action)HandleWrongDeviceMode);
+                    else HandleWrongDeviceMode();
+                }
+                catch (Exception ex) { Program.LogLine("wrong-mode marshal failed: " + ex.Message); }
+            }
+
+            WarnIfMultipleDevices(deviceSerial);
+        }
+
+        /// <summary>
+        /// cid.dll Signal'inden gelen model adı yeni nesil cihazı mı gösteriyor?
+        /// Örnekler: "CID v6", "CID v5a", iki cihazda "CID v6,CID v6".
+        /// Eski aile ise "C812A" / "C814A" döner ve bu false'tur.
+        /// </summary>
+        private static bool IsNewDeviceModel(string model)
+        {
+            if (string.IsNullOrEmpty(model)) return false;
+            var m = model.ToLowerInvariant();
+            return m.Contains("v5") || m.Contains("v6");
+        }
+
+        /// <summary>
+        /// Yanlış cihaz türü tespit edildi: bir kez otomatik olarak doğru moda
+        /// geçip yeniden başlat. İkinci kez tespit edilirse (kullanıcı elle geri
+        /// almışsa) sadece uyar — restart döngüsüne girmeyelim.
+        /// </summary>
+        private void HandleWrongDeviceMode()
+        {
+            AppendLog("⚠ Cihaz YENİ nesil görünüyor (model='" + _lastCidModel + "').");
+            AppendLog("   'Eski cihaz' modunda bu cihazda arayan numara YAKALANMAZ —" +
+                      " cihaz görünür ama çağrı gelmez.");
+
+            if (_autoSwitchedToCom)
+            {
+                SetWarning("⚠ Cihaz türü yanlış: bu cihaz 'Yeni cihaz (CID v5/v6)' olmalı");
+                return;
+            }
+
+            _autoSwitchedToCom = true;
+            _deviceMode = "com";
+            SaveConfig();
+            AppendLog("   → Otomatik olarak 'Yeni cihaz (CID v5/v6)' moduna geçiliyor," +
+                      " uygulama yeniden başlatılıyor…");
+            Program.LogLine("Auto-switch cid → com (model='" + _lastCidModel + "')");
+
+            var t = new Timer { Interval = 1500 };
+            t.Tick += (_, __) =>
+            {
+                t.Stop();
+                _reallyExit = true;
+                if (_tray != null) _tray.Visible = false;
+                Application.Restart();
+            };
+            t.Start();
+        }
+
+        /// <summary>
+        /// Seri no virgüllü geliyorsa aynı PC'ye birden fazla caller-ID kutusu
+        /// takılıdır (Güven Halı: 2 kutu × 2 hat = 4 telefon). Sürücü tek kutuyu
+        /// dinliyor olabilir — kullanıcı her hattan test etmeli.
+        /// </summary>
+        private void WarnIfMultipleDevices(string serial)
+        {
+            if (_multiDeviceWarned || string.IsNullOrEmpty(serial) || serial.IndexOf(',') < 0) return;
+            _multiDeviceWarned = true;
+            AppendLog("ℹ Birden fazla cihaz bağlı (seri: " + serial + ").");
+            AppendLog("   Sürücü yalnızca birini dinliyor olabilir — HER hattan test araması yapın.");
+        }
+
+        /// <summary>Status etiketinde kalıcı kırmızı uyarı gösterir.</summary>
+        private void SetWarning(string text)
+        {
+            _warning = text;
+            UpdateStatusLabel();
         }
 
         /// <summary>
@@ -564,6 +661,17 @@ namespace ProTakipCallerBridgeCom
 
         private void UpdateStatusLabel()
         {
+            // Uyarı varsa her şeyin önüne geçer. "Dinleniyor (Bağlı)" yazısı
+            // yanlış moddayken de yeşil göründüğü için kullanıcı sorunu
+            // göremiyordu — uyarı bu satırı devralır.
+            if (!string.IsNullOrEmpty(_warning))
+            {
+                _statusLabel.Text = _warning;
+                _statusLabel.ForeColor = Color.FromArgb(185, 28, 28); // red-700
+                return;
+            }
+
+            _statusLabel.ForeColor = SystemColors.ControlText;
             if (string.IsNullOrEmpty(_deviceToken))
                 _statusLabel.Text = "Token gerekli — yapıştırıp Kaydet'e basın";
             else
@@ -950,6 +1058,37 @@ namespace ProTakipCallerBridgeCom
                 var model = _cid.Command("Devicemodel") ?? string.Empty;
                 var serial = _cid.Command("Serial") ?? string.Empty;
                 _deviceLabel.Text = $"Cihaz (yeni / COM): model='{model}' serial='{serial}'";
+
+                if (string.IsNullOrWhiteSpace(model) && string.IsNullOrWhiteSpace(serial))
+                {
+                    // Cihaz 15 sn boyunca hiç görünmedi. En sık iki sebep:
+                    // (1) cihazı BAŞKA bir program tutuyor — sürücü aynı anda
+                    //     tek uygulamaya bağlanıyor (NegroPos, "Cihaz Test",
+                    //     cidshow açıksa köprüye sıra gelmez),
+                    // (2) cihaz gerçekten eski aile (C812A/C814A).
+                    if (++_comNoDeviceTicks >= 15 && !_comNoDeviceWarned)
+                    {
+                        _comNoDeviceWarned = true;
+                        SetWarning("⚠ Cihaz görünmüyor — başka program tutuyor olabilir");
+                        AppendLog("⚠ 15 sn'dir cihaz görünmüyor.");
+                        AppendLog("   1) Cihazı tutan diğer programları KAPATIN " +
+                                  "(NegroPos, 'Cihaz Test', cidshow) — cihaz aynı anda tek programa bağlanır.");
+                        AppendLog("   2) USB kablosunu çıkarıp başka porta takın.");
+                        AppendLog("   3) Cihazınız eski model (C812A/C814A) ise cihaz türünü değiştirin.");
+                    }
+                }
+                else
+                {
+                    _comNoDeviceTicks = 0;
+                    if (_comNoDeviceWarned)
+                    {
+                        _comNoDeviceWarned = false;
+                        _warning = null;
+                        AppendLog("✓ Cihaz göründü: model='" + model + "' serial='" + serial + "'");
+                        UpdateStatusLabel();
+                    }
+                    WarnIfMultipleDevices(serial);
+                }
             }
             catch (Exception ex)
             {
@@ -1037,6 +1176,8 @@ namespace ProTakipCallerBridgeCom
                     else if (key == "apiBase") _apiBase = val;
                     else if (key == "deviceMode")
                         _deviceMode = (val == "cid") ? "cid" : "com";
+                    else if (key == "autoSwitched")
+                        _autoSwitchedToCom = val == "1";
                 }
             }
             catch { /* best-effort */ }
@@ -1047,7 +1188,8 @@ namespace ProTakipCallerBridgeCom
             try
             {
                 File.WriteAllText(ConfigPath,
-                    $"deviceToken={_deviceToken}\r\napiBase={_apiBase}\r\ndeviceMode={_deviceMode}\r\n");
+                    $"deviceToken={_deviceToken}\r\napiBase={_apiBase}\r\ndeviceMode={_deviceMode}\r\n" +
+                    $"autoSwitched={(_autoSwitchedToCom ? "1" : "0")}\r\n");
             }
             catch { /* best-effort */ }
         }
