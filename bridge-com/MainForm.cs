@@ -1,5 +1,6 @@
 using System;
 using System.ComponentModel;
+using System.Diagnostics;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.IO;
@@ -7,6 +8,7 @@ using System.Net;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Windows.Forms;
+using Microsoft.Win32;
 
 namespace ProTakipCallerBridgeCom
 {
@@ -170,6 +172,18 @@ namespace ProTakipCallerBridgeCom
             };
             Controls.Add(tokenTitle);
 
+            // Tek tıkla tam tanı — destek konuşmasında "şu satırda ne yazıyor,
+            // log'u atar mısın, hangi programlar açık" turlarını tek yapıştırmaya
+            // indirir. Panoya kopyalar, Hakan WhatsApp'a yapıştırır.
+            var diagBtn = new Button
+            {
+                Text = "Tanıyı Kopyala",
+                Location = new Point(492, 138),
+                Size = new Size(136, 25),
+            };
+            diagBtn.Click += (_, __) => CopyDiagnostics();
+            Controls.Add(diagBtn);
+
             // PlaceholderText .NET 5+ — net40'ta yok.
             _tokenBox = new TextBox
             {
@@ -281,6 +295,14 @@ namespace ProTakipCallerBridgeCom
                 _cid.Start();
                 Program.LogLine("StartComMode: ActiveX Start() OK — CID v5/v6 dinleniyor");
                 AppendLog("Yeni cihaz (CID v5/v6) modu aktif — dinleniyor");
+
+                // Başlangıç teşhisi log'a — "cihaz görünmüyor" şikâyetinde
+                // bridge.log tek başına sebebi söylesin: sürücü kayıtlı mı,
+                // cihaz ilk sorguda ne dönüyor, rakip süreç açık mı.
+                Program.LogLine("StartComMode: HKCR CIDv5CallerID.CIDv5 present=" + IsCidv5Registered());
+                Program.LogLine("StartComMode: ilk sorgu → model='" + SafeCommand("Devicemodel") +
+                    "' serial='" + SafeCommand("Serial") + "'");
+                Program.LogLine("StartComMode: cihazı tutabilecek süreçler: " + ListCompetingProcesses());
             }
             catch (Exception ex)
             {
@@ -456,6 +478,106 @@ namespace ProTakipCallerBridgeCom
         {
             _warning = text;
             UpdateStatusLabel();
+        }
+
+        /// <summary>
+        /// Cihazı aynı anda tek uygulama tutabildiği için, köprü cihazı
+        /// göremediğinde ilk sorulacak soru "başka ne açık?" oluyor. Bilinen
+        /// rakip süreçleri isimden tarayıp tanıya yazıyoruz.
+        /// </summary>
+        private static string ListCompetingProcesses()
+        {
+            string[] needles = { "negropos", "cihaz", "cidshow", "cid", "caller" };
+            var found = new StringBuilder();
+            try
+            {
+                foreach (var p in Process.GetProcesses())
+                {
+                    string n;
+                    try { n = p.ProcessName; } catch { continue; }
+                    if (string.Equals(n, "ProTakipCallerBridgeCom", StringComparison.OrdinalIgnoreCase)) continue;
+                    var low = n.ToLowerInvariant();
+                    foreach (var needle in needles)
+                    {
+                        if (low.IndexOf(needle, StringComparison.Ordinal) < 0) continue;
+                        if (found.Length > 0) found.Append(", ");
+                        found.Append(n);
+                        break;
+                    }
+                }
+            }
+            catch (Exception ex) { return "(taranamadı: " + ex.Message + ")"; }
+            return found.Length == 0 ? "(yok)" : found.ToString();
+        }
+
+        private static bool IsCidv5Registered()
+        {
+            try
+            {
+                using (var k = Registry.ClassesRoot.OpenSubKey("CIDv5CallerID.CIDv5"))
+                    return k != null;
+            }
+            catch { return false; }
+        }
+
+        /// <summary>
+        /// Destek için tam durum dökümü — panoya kopyalanır. Cihaz görünmüyorsa
+        /// sebebi ayırt eden her şey burada: COM bileşeni oluştu mu, sürücü
+        /// kayıtlı mı, Command() ne dönüyor, cihazı tutan başka süreç var mı.
+        /// </summary>
+        private void CopyDiagnostics()
+        {
+            var sb = new StringBuilder();
+            sb.AppendLine("ProTakip Caller Id — Tanı");
+            sb.AppendLine("Sürüm      : " + AppVersion + " (net48/x86)");
+            sb.AppendLine("Zaman      : " + DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"));
+            sb.AppendLine("Bilgisayar : " + Environment.MachineName + " · " + Environment.OSVersion);
+            sb.AppendLine("Cihaz türü : " + (_deviceMode == "cid"
+                ? "Eski cihaz (cid.dll)" : "Yeni cihaz (CID v5/v6 COM)") +
+                (_autoSwitchedToCom ? "  [otomatik geçiş yapıldı]" : ""));
+            sb.AppendLine("Token      : " + (_deviceToken.Length == 0
+                ? "YOK" : _deviceToken.Length + " karakter") + " · ping=" + (_isConnected ? "Bağlı" : "BAĞLI DEĞİL"));
+
+            if (_deviceMode == "cid")
+            {
+                sb.AppendLine("cid.dll    : model='" + _lastCidModel + "' serial='" + _lastCidSerial + "'");
+                if (IsNewDeviceModel(_lastCidModel))
+                    sb.AppendLine("  ⚠ Cihaz YENİ nesil — bu modda arayan numara YAKALANMAZ.");
+            }
+            else
+            {
+                sb.AppendLine("COM nesnesi: " + (_cid == null ? "OLUŞMADI (register.bat gerekli)" : "oluştu"));
+                sb.AppendLine("Sürücü kaydı (HKCR\\CIDv5CallerID.CIDv5): " + (IsCidv5Registered() ? "VAR" : "YOK"));
+                if (_cid != null)
+                {
+                    string model = "?", serial = "?";
+                    try { model = _cid.Command("Devicemodel") ?? string.Empty; } catch (Exception ex) { model = "HATA: " + ex.Message; }
+                    try { serial = _cid.Command("Serial") ?? string.Empty; } catch (Exception ex) { serial = "HATA: " + ex.Message; }
+                    sb.AppendLine("COM cihaz  : model='" + model + "' serial='" + serial + "'");
+                    if (string.IsNullOrWhiteSpace(model) && string.IsNullOrWhiteSpace(serial))
+                        sb.AppendLine("  ⚠ COM cihazı görmüyor — cihazı tutan başka program veya USB sorunu.");
+                }
+            }
+
+            sb.AppendLine("Cihazı tutabilecek açık programlar: " + ListCompetingProcesses());
+            sb.AppendLine("Log dosyası: " + LogPath);
+            sb.AppendLine();
+            sb.AppendLine("── Son kayıtlar ──");
+            for (int i = 0; i < _logList.Items.Count && i < 30; i++)
+                sb.AppendLine(_logList.Items[i].ToString());
+
+            try
+            {
+                Clipboard.SetText(sb.ToString());
+                AppendLog("✓ Tanı panoya kopyalandı — destek görüşmesine yapıştırabilirsiniz.");
+                MessageBox.Show(
+                    "Tanı bilgisi panoya kopyalandı.\n\nWhatsApp'ta ProTakip destek hattına yapıştırıp gönderin.",
+                    "ProTakip Caller Id", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }
+            catch (Exception ex)
+            {
+                AppendLog("Tanı kopyalanamadı: " + ex.Message);
+            }
         }
 
         /// <summary>
@@ -739,6 +861,12 @@ namespace ProTakipCallerBridgeCom
             for (int i = 0; i < s.Length; i++)
                 if (s[i] < '0' || s[i] > '9') return false;
             return true;
+        }
+
+        private string SafeCommand(string cmd)
+        {
+            try { return _cid != null ? (_cid.Command(cmd) ?? string.Empty) : "(COM yok)"; }
+            catch (Exception ex) { return "HATA: " + ex.Message; }
         }
 
         private string SafeGetSerial()
