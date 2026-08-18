@@ -1,4 +1,4 @@
-using System.Runtime.InteropServices;
+﻿using System.Runtime.InteropServices;
 using Microsoft.Win32;
 
 namespace ProTakipCallerBridge;
@@ -935,27 +935,125 @@ internal static class Program
 
     // ── Auto-start ──────────────────────────────────────────────────────
 
+    /// <summary>
+    /// Registers the bridge to launch on every Windows sign-in.
+    ///
+    /// <para>The HKCU <c>Run</c> key alone was not enough in the field (Güven
+    /// Halı / Ankara, 2026-08-18: "bilgisayarı her açtığımda başlamıyor").
+    /// Two reasons:</para>
+    /// <list type="number">
+    ///   <item>The user starts the bridge with <b>Yönetici olarak çalıştır</b>.
+    ///   If UAC elevates into a different admin account, <c>HKCU</c> is that
+    ///   admin's hive — the value never lands in the signed-in user's Run key,
+    ///   so nothing starts at boot.</item>
+    ///   <item>Even when the value is written correctly, Windows starts Run
+    ///   entries <b>unelevated</b>; an elevated bridge cannot re-acquire the
+    ///   privileges it had, so the caller-id device stays silent.</item>
+    /// </list>
+    ///
+    /// <para>Fix: when we are already elevated, create a Scheduled Task
+    /// (<c>ONLOGON</c> + <c>/RL HIGHEST</c>) — that survives both problems and
+    /// is exactly the "run as administrator once" moment the user is told to
+    /// do. The HKCU Run value stays as the fallback for non-elevated runs, and
+    /// is removed once the task exists so the bridge is not launched twice.</para>
+    /// </summary>
+    private const string AutoStartTaskName = "ProTakipCallerBridge";
+
     private static void RegisterAutoStart()
     {
+        var exePath = Environment.ProcessPath;
+        if (string.IsNullOrEmpty(exePath)) return;
+
+        var taskRegistered = false;
+        if (IsElevated())
+        {
+            taskRegistered = TryRegisterLogonTask(exePath);
+        }
+
         try
         {
             using var key = Registry.CurrentUser.OpenSubKey(
                 @"Software\Microsoft\Windows\CurrentVersion\Run", writable: true);
             if (key == null) return;
 
-            var exePath = Environment.ProcessPath;
-            if (string.IsNullOrEmpty(exePath)) return;
+            if (taskRegistered)
+            {
+                // Task covers start-up; a Run entry on top would launch a
+                // second (unelevated) instance and fight for the USB device.
+                if (key.GetValue(AutoStartTaskName) != null)
+                {
+                    key.DeleteValue(AutoStartTaskName, throwOnMissingValue: false);
+                    Log("Auto-start Run value removed (scheduled task owns start-up)");
+                }
+                return;
+            }
 
-            var existing = key.GetValue("ProTakipCallerBridge") as string;
+            var existing = key.GetValue(AutoStartTaskName) as string;
             if (existing != "\"" + exePath + "\"")
             {
-                key.SetValue("ProTakipCallerBridge", "\"" + exePath + "\"");
+                key.SetValue(AutoStartTaskName, "\"" + exePath + "\"");
                 Log("Auto-start registry key set");
             }
         }
         catch (Exception ex)
         {
             Log("Auto-start failed (non-fatal): " + ex.Message);
+        }
+    }
+
+    private static bool IsElevated()
+    {
+        try
+        {
+            using var identity = System.Security.Principal.WindowsIdentity.GetCurrent();
+            var principal = new System.Security.Principal.WindowsPrincipal(identity);
+            return principal.IsInRole(System.Security.Principal.WindowsBuiltInRole.Administrator);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Creates/refreshes the log-on scheduled task via <c>schtasks.exe</c>.
+    /// Deliberately shells out instead of taking a TaskScheduler COM
+    /// dependency — the bridge ships as a single self-contained exe and
+    /// schtasks is present on every supported Windows.
+    /// </summary>
+    private static bool TryRegisterLogonTask(string exePath)
+    {
+        try
+        {
+            var psi = new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = "schtasks.exe",
+                // /F overwrites an existing task (idempotent — the exe path
+                // changes when the user reinstalls to a new folder).
+                Arguments = $"/Create /F /SC ONLOGON /RL HIGHEST /TN \"{AutoStartTaskName}\" /TR \"\\\"{exePath}\\\"\"",
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+            };
+
+            using var proc = System.Diagnostics.Process.Start(psi);
+            if (proc == null) return false;
+
+            proc.WaitForExit(15000);
+            if (proc.ExitCode == 0)
+            {
+                Log("Auto-start scheduled task registered (ONLOGON, highest privileges)");
+                return true;
+            }
+
+            Log($"Auto-start scheduled task failed (exit {proc.ExitCode}): {proc.StandardError.ReadToEnd().Trim()}");
+            return false;
+        }
+        catch (Exception ex)
+        {
+            Log("Auto-start scheduled task failed (non-fatal): " + ex.Message);
+            return false;
         }
     }
 
