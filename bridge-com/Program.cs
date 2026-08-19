@@ -80,33 +80,131 @@ namespace ProTakipCallerBridgeCom
             }
         }
 
+        private const string AutoStartName = "ProTakipCallerBridgeCom";
+
         /// <summary>
-        /// HKCU\...\Run altına per-user kayıt ekler — yönetici gerekmez,
-        /// Windows oturum açınca bridge otomatik başlar. Idempotent; exe
-        /// yolu değişmediyse tekrar yazmaz.
+        /// Köprüyü her Windows oturum açılışında başlatacak şekilde kaydeder.
+        ///
+        /// <para>HKCU\...\Run TEK BAŞINA sahada yetmedi (Güven Halı / Ankara,
+        /// 2026-08-18: "bilgisayarı her yeniden başlattığımda CALLER ID bağlı
+        /// değil yazıyor" — tek firmada 16 eşleştirme kaydı birikmişti). İki
+        /// sebep:</para>
+        /// <list type="number">
+        ///   <item>Kullanıcı köprüyü <b>Yönetici olarak çalıştır</b> ile
+        ///   açıyor (COM kaydı için zaten öyle söylüyoruz). UAC farklı bir
+        ///   yönetici hesabına yükseltiyorsa HKCU o hesabın kovanı olur —
+        ///   değer oturum açan kullanıcının Run anahtarına hiç yazılmaz,
+        ///   açılışta hiçbir şey başlamaz. Aynı sebeple <c>%APPDATA%</c>
+        ///   altındaki config de o profile yazılır, token kaybolur ve
+        ///   kullanıcı her açılışta yeniden eşleştirmek zorunda kalır.</item>
+        ///   <item>Değer doğru yazılsa bile Windows Run girdilerini
+        ///   <b>yetkisiz</b> başlatır; yükseltilmiş çalışması gereken COM
+        ///   yolu sessiz kalır.</item>
+        /// </list>
+        ///
+        /// <para>Çözüm: zaten yükseltilmişken — kullanıcıya söylenen "bir kez
+        /// yönetici olarak çalıştır" anı — ONLOGON + /RL HIGHEST zamanlanmış
+        /// görev oluşturuluyor. Run değeri yetkisiz çalıştırmalar için yedek
+        /// kalıyor ve görev kurulduğunda siliniyor ki ikinci (yetkisiz) kopya
+        /// açılıp COM cihazı için kavga etmesin.</para>
+        ///
+        /// <para>Aynı düzeltme self-contained köprüde 1.0.1 ile çıkmıştı; asıl
+        /// dağıtılan ürün bu (bridge-com) olduğu için buraya da taşındı.</para>
         /// </summary>
         private static void RegisterAutoStart()
         {
-            const string runKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
-            const string valueName = "ProTakipCallerBridgeCom";
-
             // net40'ta Environment.ProcessPath yok, Application.ExecutablePath
             // exe'nin tam yolunu verir.
             var exePath = Application.ExecutablePath;
             if (string.IsNullOrEmpty(exePath)) return;
 
+            var taskRegistered = false;
+            if (IsElevated())
+            {
+                taskRegistered = TryRegisterLogonTask(exePath);
+            }
+
+            const string runKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
             var quoted = "\"" + exePath + "\"";
+
             using var key = Registry.CurrentUser.OpenSubKey(runKey, writable: true);
             if (key == null) { LogLine("AutoStart: Run key açılamadı"); return; }
 
-            var existing = key.GetValue(valueName) as string;
+            if (taskRegistered)
+            {
+                if (key.GetValue(AutoStartName) != null)
+                {
+                    key.DeleteValue(AutoStartName, throwOnMissingValue: false);
+                    LogLine("AutoStart: Run değeri silindi (açılışı zamanlanmış görev üstlendi)");
+                }
+                return;
+            }
+
+            var existing = key.GetValue(AutoStartName) as string;
             if (existing == quoted)
             {
                 LogLine("AutoStart: kayıt zaten mevcut — " + quoted);
                 return;
             }
-            key.SetValue(valueName, quoted);
+            key.SetValue(AutoStartName, quoted);
             LogLine("AutoStart: kayıt edildi — " + quoted);
+        }
+
+        /// <summary>Süreç yönetici haklarıyla mı çalışıyor?</summary>
+        private static bool IsElevated()
+        {
+            try
+            {
+                using var identity = System.Security.Principal.WindowsIdentity.GetCurrent();
+                var principal = new System.Security.Principal.WindowsPrincipal(identity);
+                return principal.IsInRole(System.Security.Principal.WindowsBuiltInRole.Administrator);
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// ONLOGON zamanlanmış görevini <c>schtasks.exe</c> ile kurar/yeniler.
+        /// COM bağımlılığı eklememek için kasıtlı olarak dış süreç çağrılıyor;
+        /// schtasks desteklenen her Windows'ta mevcut. <c>/F</c> mevcut görevi
+        /// ezer — kullanıcı ZIP'i başka klasöre çıkardığında exe yolu değişir.
+        /// </summary>
+        private static bool TryRegisterLogonTask(string exePath)
+        {
+            try
+            {
+                var psi = new ProcessStartInfo
+                {
+                    FileName = "schtasks.exe",
+                    Arguments = "/Create /F /SC ONLOGON /RL HIGHEST /TN \"" + AutoStartName
+                              + "\" /TR \"\\\"" + exePath + "\\\"\"",
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                };
+
+                using var proc = Process.Start(psi);
+                if (proc == null) return false;
+
+                proc.WaitForExit(15000);
+                if (proc.ExitCode == 0)
+                {
+                    LogLine("AutoStart: zamanlanmış görev kuruldu (ONLOGON, en yüksek yetki)");
+                    return true;
+                }
+
+                LogLine("AutoStart: zamanlanmış görev kurulamadı (çıkış " + proc.ExitCode + "): "
+                        + proc.StandardError.ReadToEnd().Trim());
+                return false;
+            }
+            catch (Exception ex)
+            {
+                LogLine("AutoStart: zamanlanmış görev kurulamadı (ölümcül değil): " + ex.Message);
+                return false;
+            }
         }
 
         internal static void LogLine(string line)
